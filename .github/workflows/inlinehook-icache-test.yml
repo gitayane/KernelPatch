@@ -1,9 +1,9 @@
-name: Inlinehook I-cache test
+name: Inlinehook I-cache all-PE test
 
 on:
   push:
     branches:
-      - fix/inlinehook-icache-0138
+      - fix/inlinehook-icache-all-0138
   workflow_dispatch:
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
               raise SystemExit(f"unexpected include context count: {s.count(include_old)}")
           s = s.replace(include_old, include_new, 1)
           body_old = '''    for (int i = 0; i < transit_num; i++) {\n        transit[i + 6] = ((uint32_t *)transit_start)[i];\n    }\n    return HOOK_NO_ERR;'''
-          body_new = '''    for (int i = 0; i < transit_num; i++) {\n        transit[i + 6] = ((uint32_t *)transit_start)[i];\n    }\n\n    flush_icache_range((unsigned long)transit,\n                       (unsigned long)transit +\n                           (transit_num + 6) * sizeof(uint32_t));\n    return HOOK_NO_ERR;'''
+          body_new = '''    for (int i = 0; i < transit_num; i++) {\n        transit[i + 6] = ((uint32_t *)transit_start)[i];\n    }\n\n    /* Publish generated executable code for all CPUs, not just the local I-cache. */\n    flush_icache_range((unsigned long)transit,\n                       (unsigned long)transit +\n                           (transit_num + 6) * sizeof(uint32_t));\n    flush_icache_all();\n    return HOOK_NO_ERR;'''
           if s.count(body_old) != 1:
               raise SystemExit(f"unexpected hook_chain_prepare body count: {s.count(body_old)}")
           s = s.replace(body_old, body_new, 1)
@@ -38,8 +38,9 @@ jobs:
 
       - name: Verify patch
         run: |
-          grep -n -A8 -B4 'flush_icache_range' kernel/base/hook.c
+          grep -n -A10 -B4 'flush_icache_range' kernel/base/hook.c
           test "$(grep -c '^#include <cache.h>$' kernel/base/hook.c)" = 1
+          test "$(grep -c 'flush_icache_all();' kernel/base/hook.c)" = 1
 
       - name: Install compiler
         run: |
@@ -56,7 +57,7 @@ jobs:
       - name: Upload patched kpimg
         uses: actions/upload-artifact@v4
         with:
-          name: kpimg-android-inlinehook-icache
+          name: kpimg-android-inlinehook-icache-all
           path: kernel/kpimg
 
       - name: Print SHA256
