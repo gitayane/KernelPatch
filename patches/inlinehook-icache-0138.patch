@@ -1,0 +1,23 @@
+diff --git a/kernel/base/hook.c b/kernel/base/hook.c
+index b18157c..inlinehookic 100644
+--- a/kernel/base/hook.c
++++ b/kernel/base/hook.c
+@@ -6,6 +6,9 @@
+ #include <pgtable.h>
+ #include <hotpatch.h>
+ #include <kpmalloc.h>
++#ifndef KP_HOOK_EXTERNAL_CHAIN_PREPARE
++#include <cache.h>
++#endif
+ #include "hmem.h"
+@@ -700,6 +703,10 @@ static hook_err_t hook_chain_prepare(uint32_t *transit, int32_t argno)
+     for (int i = 0; i < transit_num; i++) {
+         transit[i + 6] = ((uint32_t *)transit_start)[i];
+     }
++
++    flush_icache_range((unsigned long)transit,
++                       (unsigned long)transit +
++                           (transit_num + 6) * sizeof(uint32_t));
+     return HOOK_NO_ERR;
+ }
+*** End Patch
