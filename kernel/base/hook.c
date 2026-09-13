@@ -389,10 +389,20 @@ _transit4(uint64_t arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
         hook_chain4_callback func = hook_chain->befores[i];
         if (func) func(&fargs, hook_chain->udata[i]);
     }
+    
     if (!fargs.skip_origin) {
-        transit4_func_t origin_func = (transit4_func_t)hook_chain->hook.relo_addr;
+        transit4_func_t origin_func =
+            (transit4_func_t)((hook_chain_t *)fargs.chain)->hook.relo_addr;
         fargs.ret = origin_func(fargs.arg0, fargs.arg1, fargs.arg2, fargs.arg3);
     }
+    
+    /*
+     * Do not rely on x20 surviving arbitrary before/origin/after callbacks.
+     * fargs.chain is the authoritative chain pointer stored in the transit
+     * frame itself.
+     */
+    hook_chain = (hook_chain_t *)fargs.chain;
+    
     for (int32_t i = hook_chain->chain_items_max - 1; i >= 0; i--) {
         if (hook_chain->states[i] != CHAIN_ITEM_STATE_READY) continue;
         hook_chain4_callback func = hook_chain->afters[i];
