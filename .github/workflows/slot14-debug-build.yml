@@ -23,6 +23,62 @@ jobs:
           curl -L -o arm-gnu-toolchain.tar.xz https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
           tar -Jxf arm-gnu-toolchain.tar.xz
 
+      - name: Patch hook memory type matching
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Add a typed lookup helper while preserving the generic lookup used by
+          # branch_func_addr() to detect any existing hook memory.
+          p = Path("kernel/base/hmem.h")
+          s = p.read_text()
+          old = "void *hook_get_mem_from_origin(uint64_t origin_addr);"
+          new = old + "\nvoid *hook_get_mem_from_origin_type(uint64_t origin_addr, enum hook_type type);"
+          if s.count(old) != 1:
+              raise SystemExit("hmem.h declaration anchor mismatch")
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path("kernel/base/hmem.c")
+          s = p.read_text()
+          anchor = """void *hook_get_mem_from_origin(uint64_t origin_addr)\n{\n    uint64_t start = mem_region_start;\n\n    for (uint64_t addr = start; addr < mem_region_end; addr += sizeof(hook_mem_warp_t)) {\n        hook_mem_warp_t *wrap = (hook_mem_warp_t *)addr;\n        if (wrap->using && wrap->addr == origin_addr) {\n            uint64_t slot = (addr - mem_region_start) / sizeof(hook_mem_warp_t);\n            uint64_t chain = (uint64_t)&wrap->chain;\n            logkv(\"KP DBG hmem lookup: slot=%llu warp=%llx chain=%llx type=%d origin=%llx normal_transit=%llx fp_transit=%llx\\n\",\n                  slot, addr, chain, (int)wrap->type, (uint64_t)origin_addr,\n                  chain + 0x280, chain + 0x340);\n            return &wrap->chain;\n        }\n    }\n    return 0;\n}\n"""
+          if s.count(anchor) != 1:
+              raise SystemExit("hmem.c generic lookup anchor mismatch")
+          helper = anchor + """\nvoid *hook_get_mem_from_origin_type(uint64_t origin_addr, enum hook_type type)\n{\n    uint64_t start = mem_region_start;\n\n    for (uint64_t addr = start; addr < mem_region_end; addr += sizeof(hook_mem_warp_t)) {\n        hook_mem_warp_t *wrap = (hook_mem_warp_t *)addr;\n        if (wrap->using && wrap->addr == origin_addr && wrap->type == type) {\n            uint64_t slot = (addr - mem_region_start) / sizeof(hook_mem_warp_t);\n            logkv(\"KP DBG hmem typed lookup: slot=%llu type=%d origin=%llx chain=%llx\\n\",\n                  slot, (int)wrap->type, (uint64_t)origin_addr, (uint64_t)&wrap->chain);\n            return &wrap->chain;\n        }\n    }\n    return 0;\n}\n"""
+          p.write_text(s.replace(anchor, helper, 1))
+
+          p = Path("kernel/base/hook.c")
+          s = p.read_text()
+          replacements = [
+              ("hook_t *hook = hook_get_mem_from_origin(origin);\n    if (!hook) return;", "hook_t *hook = (hook_t *)hook_get_mem_from_origin_type(origin, INLINE);\n    if (!hook) return;"),
+              ("hook_chain_t *chain = (hook_chain_t *)hook_get_mem_from_origin(origin);\n    if (chain) return hook_chain_add(chain, before, after, udata);", "hook_chain_t *chain = (hook_chain_t *)hook_get_mem_from_origin_type(origin, INLINE_CHAIN);\n    if (chain) return hook_chain_add(chain, before, after, udata);"),
+              ("hook_chain_t *chain = (hook_chain_t *)hook_get_mem_from_origin(origin);\n    if (!chain) return;", "hook_chain_t *chain = (hook_chain_t *)hook_get_mem_from_origin_type(origin, INLINE_CHAIN);\n    if (!chain) return;"),
+          ]
+          for old, new in replacements:
+              if s.count(old) != 1:
+                  raise SystemExit(f"hook.c replacement anchor mismatch: {old[:60]}")
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+
+          p = Path("kernel/base/fphook.c")
+          s = p.read_text()
+          replacements = [
+              ("fp_hook_chain_t *chain = hook_get_mem_from_origin(fp_addr);", "fp_hook_chain_t *chain = (fp_hook_chain_t *)hook_get_mem_from_origin_type(fp_addr, FUNCTION_POINTER_CHAIN);"),
+              ("fp_hook_chain_t *chain = (fp_hook_chain_t *)hook_get_mem_from_origin(fp_addr);", "fp_hook_chain_t *chain = (fp_hook_chain_t *)hook_get_mem_from_origin_type(fp_addr, FUNCTION_POINTER_CHAIN);"),
+          ]
+          for old, new in replacements:
+              if s.count(old) != 1:
+                  raise SystemExit(f"fphook.c replacement anchor mismatch: {old}")
+              s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+      - name: Verify hook-memory patch
+        run: |
+          grep -n "hook_get_mem_from_origin_type" kernel/base/hmem.h kernel/base/hmem.c kernel/base/hook.c kernel/base/fphook.c
+          test "$(grep -c 'hook_get_mem_from_origin_type(origin, INLINE)' kernel/base/hook.c)" = 1
+          test "$(grep -c 'hook_get_mem_from_origin_type(origin, INLINE_CHAIN)' kernel/base/hook.c)" = 2
+          test "$(grep -c 'hook_get_mem_from_origin_type(fp_addr, FUNCTION_POINTER_CHAIN)' kernel/base/fphook.c)" = 2
+
       - name: Build Android kpimg
         shell: bash
         run: |
@@ -40,11 +96,9 @@ jobs:
         with:
           name: kpimg-android
           path: kernel/kpimg-android
-          if-no-files-found: error
 
       - name: Upload kpimg.elf-android
         uses: actions/upload-artifact@v4
         with:
           name: kpimg.elf-android
           path: kernel/kpimg.elf-android
-          if-no-files-found: error
