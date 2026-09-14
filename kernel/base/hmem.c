@@ -45,6 +45,12 @@ void *hook_mem_zalloc(uintptr_t origin_addr, enum hook_type type)
         wrap->addr = origin_addr;
         wrap->type = type;
 
+        uint64_t slot = (addr - mem_region_start) / sizeof(hook_mem_warp_t);
+        uint64_t chain = (uint64_t)&wrap->chain;
+        logkv("KP DBG hmem alloc: slot=%llu warp=%llx chain=%llx type=%d origin=%llx normal_transit=%llx fp_transit=%llx size=%llx\n",
+              slot, addr, chain, (int)type, (uint64_t)origin_addr,
+              chain + 0x280, chain + 0x340, (uint64_t)sizeof(hook_mem_warp_t));
+
         for (uintptr_t i = (uintptr_t)&wrap->chain; i < (uintptr_t)&wrap->chain + sizeof(wrap->chain); i += 8) {
             *(uint64_t *)i = 0;
         }
@@ -61,6 +67,9 @@ void *hook_mem_zalloc(uintptr_t origin_addr, enum hook_type type)
 void hook_mem_free(void *hook_mem)
 {
     hook_mem_warp_t *warp = local_container_of(hook_mem, hook_mem_warp_t, chain);
+    uint64_t slot = ((uint64_t)warp - mem_region_start) / sizeof(hook_mem_warp_t);
+    logkv("KP DBG hmem free: slot=%llu warp=%llx chain=%llx type=%d origin=%llx\n",
+          slot, (uint64_t)warp, (uint64_t)&warp->chain, (int)warp->type, (uint64_t)warp->addr);
     warp->using = 0;
 }
 
@@ -71,6 +80,11 @@ void *hook_get_mem_from_origin(uint64_t origin_addr)
     for (uint64_t addr = start; addr < mem_region_end; addr += sizeof(hook_mem_warp_t)) {
         hook_mem_warp_t *wrap = (hook_mem_warp_t *)addr;
         if (wrap->using && wrap->addr == origin_addr) {
+            uint64_t slot = (addr - mem_region_start) / sizeof(hook_mem_warp_t);
+            uint64_t chain = (uint64_t)&wrap->chain;
+            logkv("KP DBG hmem lookup: slot=%llu warp=%llx chain=%llx type=%d origin=%llx normal_transit=%llx fp_transit=%llx\n",
+                  slot, addr, chain, (int)wrap->type, (uint64_t)origin_addr,
+                  chain + 0x280, chain + 0x340);
             return &wrap->chain;
         }
     }
