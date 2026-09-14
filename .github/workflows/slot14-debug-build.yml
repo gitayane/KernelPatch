@@ -28,8 +28,6 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # Add a typed lookup helper while preserving the generic lookup used by
-          # branch_func_addr() to detect any existing hook memory.
           p = Path("kernel/base/hmem.h")
           s = p.read_text()
           old = "void *hook_get_mem_from_origin(uint64_t origin_addr);"
@@ -72,12 +70,49 @@ jobs:
           p.write_text(s)
           PY
 
-      - name: Verify hook-memory patch
+      - name: Patch inline install diagnostics
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("kernel/base/hook.c")
+          s = p.read_text()
+
+          old = """    } else {\n        hook->tramp_insts_num = branch_absolute(hook->tramp_insts, hook->replace_addr);\n    }\n\n    // relocate\n"""
+          new = """    } else {\n        hook->tramp_insts_num = branch_absolute(hook->tramp_insts, hook->replace_addr);\n    }\n\n    logkv(\"KP DBG hook_prepare: func=%llx origin=%llx replace=%llx relo=%llx tramp_num=%d tramp=%08x %08x %08x %08x %08x %08x\\n\",\n          hook->func_addr, hook->origin_addr, hook->replace_addr, hook->relo_addr, hook->tramp_insts_num,\n          hook->tramp_insts[0], hook->tramp_insts[1], hook->tramp_insts[2], hook->tramp_insts[3],\n          hook->tramp_insts[4], hook->tramp_insts[5]);\n\n    // relocate\n"""
+          if s.count(old) != 1:
+              raise SystemExit("hook_prepare diagnostics anchor mismatch")
+          s = s.replace(old, new, 1)
+
+          old = """    hook->relo_insts_num += branch_from_to(buf, back_src_addr, back_dst_addr);\n    return HOOK_NO_ERR;\n}\nKP_EXPORT_SYMBOL(hook_prepare);\n"""
+          new = """    hook->relo_insts_num += branch_from_to(buf, back_src_addr, back_dst_addr);\n    logkv(\"KP DBG hook_prepare done: origin=%llx replace=%llx relo=%llx tramp_num=%d relo_num=%d origin=%08x %08x %08x %08x %08x %08x\\n\",\n          hook->origin_addr, hook->replace_addr, hook->relo_addr, hook->tramp_insts_num, hook->relo_insts_num,\n          hook->origin_insts[0], hook->origin_insts[1], hook->origin_insts[2],\n          hook->origin_insts[3], hook->origin_insts[4], hook->origin_insts[5]);\n    return HOOK_NO_ERR;\n}\nKP_EXPORT_SYMBOL(hook_prepare);\n"""
+          if s.count(old) != 1:
+              raise SystemExit("hook_prepare done diagnostics anchor mismatch")
+          s = s.replace(old, new, 1)
+
+          old = """void hook_install(hook_t *hook)\n{\n    void *addrs[TRAMPOLINE_MAX_NUM];\n    for (int32_t i = 0; i < hook->tramp_insts_num; ++i) {\n        addrs[i] = (uint32_t *)hook->origin_addr + i;\n    }\n    hotpatch(addrs, hook->tramp_insts, hook->tramp_insts_num);\n}\n"""
+          new = """void hook_install(hook_t *hook)\n{\n    void *addrs[TRAMPOLINE_MAX_NUM];\n    for (int32_t i = 0; i < hook->tramp_insts_num; ++i) {\n        addrs[i] = (uint32_t *)hook->origin_addr + i;\n    }\n    logkv(\"KP DBG hook_install before: origin=%llx expected=%llx words=%08x %08x %08x %08x %08x %08x\\n\",\n          hook->origin_addr, hook->replace_addr, hook->tramp_insts[0], hook->tramp_insts[1],\n          hook->tramp_insts[2], hook->tramp_insts[3], hook->tramp_insts[4], hook->tramp_insts[5]);\n    int rc = hotpatch(addrs, hook->tramp_insts, hook->tramp_insts_num);\n    logkv(\"KP DBG hook_install after: rc=%d origin_words=%08x %08x %08x %08x %08x %08x\\n\",\n          rc, *((uint32_t *)hook->origin_addr + 0), *((uint32_t *)hook->origin_addr + 1),\n          *((uint32_t *)hook->origin_addr + 2), *((uint32_t *)hook->origin_addr + 3),\n          *((uint32_t *)hook->origin_addr + 4), *((uint32_t *)hook->origin_addr + 5));\n}\n"""
+          if s.count(old) != 1:
+              raise SystemExit("hook_install diagnostics anchor mismatch")
+          s = s.replace(old, new, 1)
+
+          old = """    for (int i = 0; i < transit_num; i++) {\n        transit[i + 6] = ((uint32_t *)transit_start)[i];\n    }\n    return HOOK_NO_ERR;\n}\n#else\n"""
+          new = """    for (int i = 0; i < transit_num; i++) {\n        transit[i + 6] = ((uint32_t *)transit_start)[i];\n    }\n    logkv(\"KP DBG transit_prepare: transit=%llx chain=%llx argno=%d num=%d words=%08x %08x %08x %08x %08x %08x %08x %08x\\n\",\n          (uint64_t)transit, (uint64_t)chain, argno, transit_num,\n          transit[0], transit[1], transit[2], transit[3], transit[4], transit[5], transit[6], transit[7]);\n    return HOOK_NO_ERR;\n}\n#else\n"""
+          if s.count(old) != 1:
+              raise SystemExit("transit diagnostics anchor mismatch")
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+
+      - name: Verify hook-memory and inline diagnostics patches
         run: |
           grep -n "hook_get_mem_from_origin_type" kernel/base/hmem.h kernel/base/hmem.c kernel/base/hook.c kernel/base/fphook.c
+          grep -n "KP DBG hook_prepare\|KP DBG hook_install\|KP DBG transit_prepare" kernel/base/hook.c
           test "$(grep -c 'hook_get_mem_from_origin_type(origin, INLINE)' kernel/base/hook.c)" = 1
           test "$(grep -c 'hook_get_mem_from_origin_type(origin, INLINE_CHAIN)' kernel/base/hook.c)" = 2
           test "$(grep -c 'hook_get_mem_from_origin_type(fp_addr, FUNCTION_POINTER_CHAIN)' kernel/base/fphook.c)" = 2
+          test "$(grep -c 'KP DBG hook_install after' kernel/base/hook.c)" = 1
+          test "$(grep -c 'KP DBG transit_prepare' kernel/base/hook.c)" = 1
 
       - name: Build Android kpimg
         shell: bash
