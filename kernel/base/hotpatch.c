@@ -90,6 +90,23 @@ int hotpatch_nosync(void *addr, uint32_t value)
 }
 KP_EXPORT_SYMBOL(hotpatch_nosync);
 
+int hotpatch_data_u64(void *addr, uint64_t value)
+{
+    uintptr_t tp = (uintptr_t)addr;
+    if (tp & 0x7) return -EINVAL;
+
+    uintptr_t *entry = pgtable_entry_kernel(tp);
+    if (!entry) return -EFAULT;
+
+    uintptr_t ori_prot = *entry;
+    modify_entry_kernel(tp, entry, (ori_prot | PTE_DBM) & ~PTE_RDONLY);
+    *(volatile uint64_t *)tp = value;
+    dsb(ish);
+    modify_entry_kernel(tp, entry, ori_prot);
+    return 0;
+}
+KP_EXPORT_SYMBOL(hotpatch_data_u64);
+
 struct hotpatch_t
 {
     void **addrs;
