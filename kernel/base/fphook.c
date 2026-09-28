@@ -8,6 +8,7 @@
 #include <symbol.h>
 #include <pgtable.h>
 #include <hotpatch.h>
+#include <common.h>
 #include "hmem.h"
 
 // transit0
@@ -212,6 +213,15 @@ static hook_err_t hook_chain_prepare(uint32_t *transit, int32_t argno)
 void fp_hook(uintptr_t fp_addr, void *replace, void **backup)
 {
     *(uintptr_t *)backup = *(uintptr_t *)fp_addr;
+
+    if (kver < VERSION(4, 6, 0)) {
+        int rc = hotpatch_data_u64((void *)fp_addr, (uint64_t)(uintptr_t)replace);
+        logkv("KP DBG fp_hook legacy: fp=%llx old=%llx new=%llx rc=%d now=%llx\\n",
+              fp_addr, (uint64_t)(uintptr_t)*backup, (uint64_t)(uintptr_t)replace, rc,
+              (uint64_t)*(uintptr_t *)fp_addr);
+        return;
+    }
+
     uintptr_t addrs[2];
     addrs[0] = fp_addr;
     addrs[1] = fp_addr + 4;
@@ -221,6 +231,13 @@ KP_EXPORT_SYMBOL(fp_hook);
 
 void fp_unhook(uintptr_t fp_addr, void *backup)
 {
+    if (kver < VERSION(4, 6, 0)) {
+        int rc = hotpatch_data_u64((void *)fp_addr, (uint64_t)(uintptr_t)backup);
+        logkv("KP DBG fp_unhook legacy: fp=%llx backup=%llx rc=%d now=%llx\\n",
+              fp_addr, (uint64_t)(uintptr_t)backup, rc, (uint64_t)*(uintptr_t *)fp_addr);
+        return;
+    }
+
     uintptr_t addrs[2];
     addrs[0] = fp_addr;
     addrs[1] = fp_addr + 4;
