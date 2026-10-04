@@ -598,6 +598,294 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
     regs->regs[0] = args->ret;
 }
 
+
+/*
+ * Linux 4.4 syscall entry backend.
+ *
+ * 4.4 does not have invoke_syscall()/el0_svc_common(). The actual ARM64 entry
+ * path selects the handler directly in el0_svc_naked:
+ *
+ *   ldr x16, [stbl, scno, lsl #3]
+ *   blr x16
+ *
+ * The same sequence occurs once in the fast path and once in __sys_trace.
+ * Patch both sites to a small KP assembly entry. The KP dispatcher then calls
+ * the original table entry and continues at the original return path.
+ */
+#define KP4_SYSCALL_LDR_X16_SCNO 0xf87a7b70u
+#define KP4_SYSCALL_BLR_X16      0xd63f0200u
+#define KP4_SYSCALL_STR_X0_SP_MASK 0xffc003ffu
+#define KP4_SYSCALL_STR_X0_SP      0xf90003e0u
+#define KP4_SYSCALL_B_MASK        0xfc000000u
+#define KP4_SYSCALL_B             0x14000000u
+
+extern void kp_syscall_4_4_fast_entry(void);
+extern void kp_syscall_4_4_trace_entry(void);
+
+static uintptr_t syscall_4_4_fast_site;
+static uintptr_t syscall_4_4_trace_site;
+static uintptr_t syscall_4_4_fast_return;
+static uintptr_t syscall_4_4_trace_return;
+static uint32_t syscall_4_4_fast_backup[3];
+static uint32_t syscall_4_4_trace_backup[3];
+
+static bool syscall_4_4_is_b(uint32_t insn)
+{
+    return (insn & KP4_SYSCALL_B_MASK) == KP4_SYSCALL_B;
+}
+
+static uintptr_t syscall_4_4_b_target(uintptr_t pc, uint32_t insn)
+{
+    int64_t imm26 = (int64_t)(insn & 0x03ffffffu);
+    if (imm26 & (1LL << 25)) imm26 |= ~((1LL << 26) - 1);
+    return (uintptr_t)((int64_t)pc + (imm26 << 2));
+}
+
+static bool syscall_4_4_is_str_x0_sp(uint32_t insn)
+{
+    return (insn & KP4_SYSCALL_STR_X0_SP_MASK) == KP4_SYSCALL_STR_X0_SP;
+}
+
+/*
+ * Emit:
+ *
+ *   adrp x16, target@page
+ *   add  x16, x16, target@pageoff
+ *   br   x16
+ *
+ * This reaches any target within +/-4 GiB of the patch site. KP memory and the
+ * kernel image are expected to be in the same 48-bit kernel VA region; if the
+ * runtime layout violates that assumption we leave the original syscall path
+ * untouched rather than installing a truncated branch.
+ */
+static bool syscall_4_4_make_branch(uintptr_t pc, uintptr_t target, uint32_t out[3])
+{
+    int64_t pc_page = (int64_t)(pc & ~0xffful);
+    int64_t target_page = (int64_t)(target & ~0xffful);
+    int64_t delta_pages = (target_page - pc_page) >> 12;
+
+    if (delta_pages < -(1LL << 20) || delta_pages > ((1LL << 20) - 1)) return false;
+
+    uint32_t imm21 = (uint32_t)(delta_pages & 0x1fffff);
+    uint32_t immlo = imm21 & 0x3;
+    uint32_t immhi = (imm21 >> 2) & 0x7ffff;
+    uint32_t pageoff = (uint32_t)(target & 0xfff);
+
+    out[0] = 0x90000010u | (immlo << 29) | (immhi << 5);
+    out[1] = 0x91000210u | (pageoff << 10);
+    out[2] = 0xd61f0200u; /* br x16 */
+    return true;
+}
+
+static int syscall_4_4_find_sites(uintptr_t el0_svc, uintptr_t *fast, uintptr_t *trace)
+{
+    uintptr_t ret_fast = syscall_4_4_fast_return;
+    uintptr_t fast_found = 0;
+    uintptr_t trace_found = 0;
+
+    for (unsigned long off = 0; off < 0x1000; off += 4) {
+        uintptr_t addr = el0_svc + off;
+        uint32_t *p = (uint32_t *)addr;
+        uint32_t a = p[0];
+        uint32_t b = p[1];
+        uint32_t c = p[2];
+
+        if (a != KP4_SYSCALL_LDR_X16_SCNO || b != KP4_SYSCALL_BLR_X16) continue;
+
+        if (!fast_found && syscall_4_4_is_b(c)) {
+            if (!ret_fast || syscall_4_4_b_target(addr + 8, c) == ret_fast)
+                fast_found = addr;
+            continue;
+        }
+
+        if (!trace_found && syscall_4_4_is_str_x0_sp(c))
+            trace_found = addr;
+    }
+
+    if (!fast_found || !trace_found) return -ENOENT;
+    *fast = fast_found;
+    *trace = trace_found;
+    return 0;
+}
+
+static long syscall_4_4_invoke_original(struct pt_regs *regs, long nr, int is_compat)
+{
+    uintptr_t addr;
+
+    if (nr < 0) return -ENOSYS;
+    if (is_compat) {
+#ifdef __NR_compat_syscalls
+        if (nr >= __NR_compat_syscalls) return -ENOSYS;
+#else
+        if (nr >= 460) return -ENOSYS;
+#endif
+    } else {
+#ifdef __NR_syscalls
+        if (nr >= __NR_syscalls) return -ENOSYS;
+#else
+        if (nr >= 460) return -ENOSYS;
+#endif
+    }
+
+    addr = syscalln_addr((int)nr, is_compat);
+    if (!addr) return -ENOSYS;
+
+    /*
+     * Linux ARM64 syscall handlers use x0..x5. Passing six arguments is ABI
+     * compatible with handlers that consume fewer arguments; unused registers
+     * are simply ignored by the callee.
+     */
+    return ((raw_syscall6_f)addr)(
+        (long)regs->regs[0],
+        (long)regs->regs[1],
+        (long)regs->regs[2],
+        (long)regs->regs[3],
+        (long)regs->regs[4],
+        (long)regs->regs[5]
+    );
+}
+
+static void syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace)
+{
+    hook_fargs8_t fargs;
+    int is_compat;
+    long ret;
+    uintptr_t target;
+
+    if (!regs) {
+        target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
+        if (target)
+            ((void (*)(long))target)(-ENOSYS);
+        __builtin_unreachable();
+    }
+
+    is_compat = compat_user_mode(regs) ? 1 : 0;
+    regs->syscallno = (long)nr;
+
+    fargs.chain = 0;
+    fargs.skip_origin = 0;
+    fargs.ret = 0;
+    fargs.arg0 = (uint64_t)regs;
+    fargs.arg1 = nr;
+    fargs.arg2 = 0;
+    fargs.arg3 = 0;
+    fargs.arg4 = 0;
+    fargs.arg5 = 0;
+    fargs.arg6 = 0;
+    fargs.arg7 = 0;
+
+    syscall_dispatch_before(&fargs, 0);
+
+    if (fargs.skip_origin && syscall_hook_handler_granular) {
+        ret = (long)regs->regs[0];
+    } else {
+        ret = syscall_4_4_invoke_original(regs, (long)nr, is_compat);
+        regs->regs[0] = ret;
+    }
+
+    /*
+     * Keep the same after-hook semantics as the upstream dispatcher. This is
+     * also what lets a before hook use set_syscall_argn() and an after hook
+     * rewrite regs->regs[0].
+     */
+    syscall_dispatch_after(&fargs, 0);
+    ret = (long)regs->regs[0];
+
+    target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
+    if (!target)
+        target = trace ? syscall_4_4_trace_site + 12 : 0;
+
+    if (target) {
+        if (trace)
+            ((void (*)(void))target)();
+        else
+            ((void (*)(long))target)(ret);
+    }
+    __builtin_unreachable();
+}
+
+/*
+ * The assembly entry labels are intentionally separate so the return address
+ * can be chosen without touching the 4.4 entry stack/register convention.
+ */
+void kp_syscall_4_4_fast_dispatch(struct pt_regs *regs, unsigned long nr)
+{
+    syscall_4_4_dispatch(regs, nr, 0);
+    __builtin_unreachable();
+}
+
+void kp_syscall_4_4_trace_dispatch(struct pt_regs *regs, unsigned long nr)
+{
+    syscall_4_4_dispatch(regs, nr, 1);
+    __builtin_unreachable();
+}
+
+static int syscall_dispatch_4_4_init(void)
+{
+    uintptr_t el0_svc;
+    uintptr_t fast;
+    uintptr_t trace;
+    uint32_t fast_patch[3];
+    uint32_t trace_patch[3];
+
+    el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
+    syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
+    if (!el0_svc || !syscall_4_4_fast_return) {
+        log_boot("4.4 dispatcher: missing el0_svc/ret_fast_syscall\\n");
+        return -ENOENT;
+    }
+
+    syscall_4_4_trace_return = 0;
+    if (!syscall_4_4_find_sites(el0_svc, &fast, &trace)) {
+        /* The trace return is immediately after the original STR X0 instruction. */
+        syscall_4_4_trace_return = trace + 12;
+    } else {
+        log_boot("4.4 dispatcher: syscall dispatch sites not found near el0_svc\\n");
+        return -ENOENT;
+    }
+
+    syscall_4_4_fast_site = fast;
+    syscall_4_4_trace_site = trace;
+
+    if (!syscall_4_4_make_branch(fast, (uintptr_t)&kp_syscall_4_4_fast_entry, fast_patch) ||
+        !syscall_4_4_make_branch(trace, (uintptr_t)&kp_syscall_4_4_trace_entry, trace_patch)) {
+        log_boot("4.4 dispatcher: KP entry outside ADRP range\\n");
+        return -ERANGE;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        syscall_4_4_fast_backup[i] = ((uint32_t *)fast)[i];
+        syscall_4_4_trace_backup[i] = ((uint32_t *)trace)[i];
+    }
+
+    void *fast_addrs[3] = {(void *)fast, (void *)(fast + 4), (void *)(fast + 8)};
+    void *trace_addrs[3] = {(void *)trace, (void *)(trace + 4), (void *)(trace + 8)};
+
+    int rc = hotpatch(fast_addrs, fast_patch, 3);
+    if (rc) {
+        log_boot("4.4 dispatcher: fast site patch rc=%d\\n", rc);
+        return rc;
+    }
+
+    rc = hotpatch(trace_addrs, trace_patch, 3);
+    if (rc) {
+        /* Roll back the fast site if the trace site could not be patched. */
+        hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
+        log_boot("4.4 dispatcher: trace site patch rc=%d, fast site restored\\n", rc);
+        syscall_4_4_fast_site = 0;
+        syscall_4_4_trace_site = 0;
+        return rc;
+    }
+
+    syscall_hook_handler_granular = 1;
+    syscall_hook_barrier();
+    syscall_hook_global = 1;
+
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx, global syscall hook enabled\\n",
+             fast, trace, syscall_4_4_fast_return, syscall_4_4_trace_return);
+    return 0;
+}
+
 void syscall_dispatch_init(void)
 {
     if (syscall_hook_global) return;
