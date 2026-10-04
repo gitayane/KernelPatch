@@ -745,7 +745,7 @@ static long syscall_4_4_invoke_original(struct pt_regs *regs, long nr, int is_co
     );
 }
 
-static void syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace)
+static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace)
 {
     hook_fargs8_t fargs;
     int is_compat;
@@ -808,13 +808,13 @@ static void syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int tra
  * The assembly entry labels are intentionally separate so the return address
  * can be chosen without touching the 4.4 entry stack/register convention.
  */
-void kp_syscall_4_4_fast_dispatch(struct pt_regs *regs, unsigned long nr)
+void __noreturn kp_syscall_4_4_fast_dispatch(struct pt_regs *regs, unsigned long nr)
 {
     syscall_4_4_dispatch(regs, nr, 0);
     __builtin_unreachable();
 }
 
-void kp_syscall_4_4_trace_dispatch(struct pt_regs *regs, unsigned long nr)
+void __noreturn kp_syscall_4_4_trace_dispatch(struct pt_regs *regs, unsigned long nr)
 {
     syscall_4_4_dispatch(regs, nr, 1);
     __builtin_unreachable();
