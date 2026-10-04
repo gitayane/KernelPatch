@@ -58,7 +58,20 @@ static int exclude_kstorage_gid = -1;
 static void su_register_path_probe_hooks(void);
 static void su_unregister_path_probe_hooks(void);
 static int su_hook_getname_flags(void);
+static int su_hook_security_inode_getattr(void);
 static int su_syscall_gate(void);
+
+/*
+ * Shared path-probe hooks. The normal path is getname_flags +
+ * security_inode_getattr, matching upstream KernelPatch. The old
+ * per-syscall probes remain as a fallback when a 4.4/LTO symbol cannot
+ * be resolved or hooked safely.
+ */
+static unsigned long su_getname_flags_addr;
+static unsigned long su_security_inode_getattr_addr;
+static bool su_getname_flags_hooked;
+static bool su_security_inode_getattr_hooked;
+static bool su_legacy_path_hooks_registered;
 long kp_control_feature_sc(const char __user *uname, int state)
 {
     char name[64];
@@ -595,64 +608,123 @@ int su_compat_init()
 }
 static int su_hook_getname_flags(void)
 {
-    // Redirect the su path only for granted uids: after_getname_flags checks
-    // is_su_allow_uid/is_trusted_manager_uid, so a granted app's stat/access on
-    // /system/bin/su or /system/bin/kp lands on the real /system/bin/sh and the
-    // probe reports it present, while unprivileged callers keep the virtual su
-    // path un-redirected and get ENOENT (hidden).
-    //
-    // LTO kernels (e.g. OPPO 6.1) emit getname_flags as a CFI wrapper with zero
-    // callers; the real entry all path syscalls reach is __original_getname_flags.
-    // Prefer it, fall back to getname_flags for non-LTO builds.
-    hook_err_t rc = 0;
-    unsigned long getname_flags_addr = 0;
-    getname_flags_addr = kallsyms_lookup_name("__original_getname_flags");
-    if (!getname_flags_addr) {
-        getname_flags_addr = kallsyms_lookup_name("getname_flags");
-    }else{
-        logkfi("found __original_getname_flags: %llx\n", getname_flags_addr);
+    unsigned long addr = kallsyms_lookup_name_by_suffix("getname_flags");
+    if (!addr) {
+        log_boot("getname_flags not found (including compiler suffixes)\n");
+        return -HOOK_BAD_ADDRESS;
     }
-    if (getname_flags_addr) {
-        rc = hook_wrap3((void *)getname_flags_addr, 0, after_getname_flags, (void *)0);
-        log_boot("hook getname_flags rc: %d\n", rc);
-    } else {
-        log_boot("getname_flags not found\n");
-        rc = -HOOK_BAD_ADDRESS;
+
+    hook_err_t rc = hook_wrap3((void *)addr, 0, after_getname_flags, (void *)0);
+    if (rc) {
+        log_boot("hook getname_flags @ %llx rc: %d\n", addr, rc);
+        return rc;
     }
-    return rc;
+
+    su_getname_flags_addr = addr;
+    su_getname_flags_hooked = true;
+    log_boot("hook getname_flags @ %llx rc: 0\n", addr);
+    return 0;
+}
+
+static int su_hook_security_inode_getattr(void)
+{
+    unsigned long dentry_addr = kallsyms_lookup_name_by_suffix("dentry_path_raw");
+    if (!dentry_addr) {
+        log_boot("dentry_path_raw not found (including compiler suffixes)\n");
+        return -HOOK_BAD_ADDRESS;
+    }
+
+    su_dentry_path_raw = (su_dentry_path_raw_t)dentry_addr;
+
+    unsigned long getattr_addr = kallsyms_lookup_name_by_suffix("security_inode_getattr");
+    if (!getattr_addr) {
+        log_boot("security_inode_getattr not found (including compiler suffixes)\n");
+        su_dentry_path_raw = 0;
+        return -HOOK_BAD_ADDRESS;
+    }
+
+    hook_err_t rc = hook_wrap1((void *)getattr_addr, 0, after_security_inode_getattr, (void *)0);
+    if (rc) {
+        log_boot("hook security_inode_getattr @ %llx rc: %d\n", getattr_addr, rc);
+        su_dentry_path_raw = 0;
+        return rc;
+    }
+
+    su_security_inode_getattr_addr = getattr_addr;
+    su_security_inode_getattr_hooked = true;
+    log_boot("hook security_inode_getattr @ %llx, dentry_path_raw @ %llx rc: 0\n",
+             getattr_addr, dentry_addr);
+    return 0;
 }
 
 static void su_register_path_probe_hooks(void)
 {
-    #ifdef ANDROID
-        if (unlikely(android_is_safe_mode)) return;
-    #endif
+#ifdef ANDROID
+    if (unlikely(android_is_safe_mode)) return;
+#endif
     hook_err_t rc;
 
-    /* udata == 1 tells the callback the dispatcher gate already handled the uid
-     * check; without the global dispatcher it must do the check itself. */
+    /*
+     * Prefer the shared upstream path-observation hooks. On this 4.4 kernel
+     * getname_flags() and security_inode_getattr() are real VFS entry points,
+     * and dentry_path_raw() lets the getattr hook identify a real su dentry.
+     *
+     * If either hook cannot be resolved/installed, keep the legacy syscall
+     * probes below as a conservative fallback rather than silently disabling
+     * path compatibility.
+     */
+    if (!su_getname_flags_hooked)
+        su_hook_getname_flags();
+    if (!su_security_inode_getattr_hooked)
+        su_hook_security_inode_getattr();
+
+    if (su_getname_flags_hooked && su_security_inode_getattr_hooked) {
+        log_boot("shared path probes enabled; legacy fstatat/faccessat probes skipped\n");
+        return;
+    }
+
+    /* Legacy per-syscall fallback. */
     void *gated = syscall_hook_global_enabled() ? (void *)1 : (void *)0;
 
     rc = hook_syscalln(__NR3264_fstatat, 4, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("hook __NR3264_fstatat rc: %d\n", rc);
+    log_boot("legacy hook __NR3264_fstatat rc: %d\n", rc);
 
     rc = hook_syscalln(__NR_faccessat, 3, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("hook __NR_faccessat rc: %d\n", rc);
+    log_boot("legacy hook __NR_faccessat rc: %d\n", rc);
 
-    /* 32-bit compat probes: fstatat64(327) / faccessat(334) */
+    /* 32-bit compat probes: fstatat64(327) / faccessat(334). */
     rc = hook_compat_syscalln(327, 4, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("hook 32 __NR_fstatat64 rc: %d\n", rc);
+    log_boot("legacy hook 32 __NR_fstatat64 rc: %d\n", rc);
 
     rc = hook_compat_syscalln(334, 3, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("hook 32 __NR_faccessat rc: %d\n", rc);
+    log_boot("legacy hook 32 __NR_faccessat rc: %d\n", rc);
+
+    su_legacy_path_hooks_registered = true;
 }
 
 static void su_unregister_path_probe_hooks(void)
 {
-    unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
-    unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
-    unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
-    unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
+    if (su_legacy_path_hooks_registered) {
+        unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
+        unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
+        unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
+        unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
+        su_legacy_path_hooks_registered = false;
+    }
+
+    if (su_security_inode_getattr_hooked) {
+        hook_unwrap((void *)su_security_inode_getattr_addr, 0, after_security_inode_getattr);
+        su_security_inode_getattr_addr = 0;
+        su_security_inode_getattr_hooked = false;
+    }
+
+    if (su_getname_flags_hooked) {
+        hook_unwrap((void *)su_getname_flags_addr, 0, after_getname_flags);
+        su_getname_flags_addr = 0;
+        su_getname_flags_hooked = false;
+    }
+
+    su_dentry_path_raw = 0;
 }
 
 void sucompat_init()
