@@ -890,6 +890,14 @@ void syscall_dispatch_init(void)
 {
     if (syscall_hook_global) return;
     if (!has_syscall_wrapper) {
+        /*
+         * Linux 4.4 ARM64 has no invoke_syscall()/el0_svc_common(). Use the
+         * dedicated entry.S backend, but only for the 4.4 ABI/layout. On all
+         * other kernels preserve the existing per-syscall fallback.
+         */
+        if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
+            if (syscall_dispatch_4_4_init() == 0) return;
+        }
         log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
         return;
     }
