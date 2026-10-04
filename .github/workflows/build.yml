@@ -21,7 +21,7 @@ jobs:
           MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
-          VERSION="$MAJOR.$MINOR.$PATCH"
+          VERSION="$MAJOR.$MINOR.$PATCH-xzp1"
           echo "Generated Version: $VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
       - name: Install Compiler
@@ -141,7 +141,7 @@ jobs:
           $MAJOR = (Select-String -Path version -Pattern '#define MAJOR').Line.Split(' ')[2]
           $MINOR = (Select-String -Path version -Pattern '#define MINOR').Line.Split(' ')[2]
           $PATCH = (Select-String -Path version -Pattern '#define PATCH').Line.Split(' ')[2]
-          $VERSION = "$MAJOR.$MINOR.$PATCH"
+          $VERSION = "$MAJOR.$MINOR.$PATCH-xzp1"
           Write-Output "Generated Version: $VERSION"
           "VERSION=$VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
           Add-Content -Path $env:GITHUB_OUTPUT -Value "VERSION=$VERSION"
@@ -205,7 +205,7 @@ jobs:
           MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
-          VERSION="$MAJOR.$MINOR.$PATCH"
+          VERSION="$MAJOR.$MINOR.$PATCH-xzp1"
           echo "Generated Version: $VERSION"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
@@ -263,7 +263,7 @@ jobs:
           MAJOR=$(grep '#define MAJOR' version | awk '{print $3}')
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
-          VERSION="$MAJOR.$MINOR.$PATCH"
+          VERSION="$MAJOR.$MINOR.$PATCH-xzp1"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
       - uses: actions/download-artifact@v4
         with:
