@@ -46,7 +46,7 @@ uintptr_t syscalln_addr(int nr, int is_compat);
 static inline uint64_t *syscall_args(void *hook_fargs)
 {
     uint64_t *args;
-    if (has_syscall_wrapper) {
+    if (has_syscall_wrapper || syscall_hook_global_enabled()) {
         args = ((struct pt_regs *)((hook_fargs0_t *)hook_fargs)->args[0])->regs;
     } else {
         args = ((hook_fargs0_t *)hook_fargs)->args;
