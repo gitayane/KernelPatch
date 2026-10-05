@@ -236,8 +236,18 @@ jobs:
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
           VERSION="$MAJOR.$MINOR.$PATCH"
+          if [[ "$GITHUB_REF" == refs/heads/work/* ]]; then
+            RELEASE_TAG="${VERSION}-dev.${GITHUB_RUN_NUMBER}"
+            IS_PRERELEASE=true
+          else
+            RELEASE_TAG="$VERSION"
+            IS_PRERELEASE=false
+          fi
           echo "Generated Version: $VERSION"
+          echo "Release tag: $RELEASE_TAG (prerelease=$IS_PRERELEASE)"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_OUTPUT
 
       - name: Make hdr
         run: |
