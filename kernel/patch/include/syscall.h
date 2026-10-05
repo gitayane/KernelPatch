@@ -46,7 +46,7 @@ uintptr_t syscalln_addr(int nr, int is_compat);
 static inline uint64_t *syscall_args(void *hook_fargs)
 {
     uint64_t *args;
-    if (has_syscall_wrapper) {
+    if (has_syscall_wrapper || syscall_hook_global_enabled()) {
         args = ((struct pt_regs *)((hook_fargs0_t *)hook_fargs)->args[0])->regs;
     } else {
         args = ((hook_fargs0_t *)hook_fargs)->args;
@@ -167,16 +167,16 @@ hook_err_t hook_compat_syscalln(int nr, int narg, void *before, void *after, voi
 void unhook_compat_syscalln(int nr, void *before, void *after);
 
 /**
- * @brief Install the single el0_svc_common hook that backs hook_syscalln.
+ * @brief Install the global syscall dispatcher backend used by hook_syscalln.
  *
- * Must run after bypass_kcfi() and after syscall_init() so the syscall-wrapper
- * detection is available. On failure (or when el0_svc_common cannot be
- * resolved) hook_syscalln transparently keeps using the per-syscall mechanism.
+ * Modern kernels use invoke_syscall()/el0_svc_common(); Linux 4.4 uses the
+ * dedicated el0_svc dispatcher backend. On failure hook_syscalln falls back to
+ * the per-syscall mechanism.
  */
 void syscall_dispatch_init(void);
 
 /**
- * @brief Non-zero once the global el0_svc_common hook is active.
+ * @brief Non-zero once the global syscall dispatcher is active.
  */
 int syscall_hook_global_enabled(void);
 
