@@ -1,6 +1,11 @@
 name: Build CI
 
 on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+      - 'work/**'
   workflow_call:
   workflow_dispatch:
 
@@ -22,8 +27,18 @@ jobs:
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
           VERSION="$MAJOR.$MINOR.$PATCH"
+          if [[ "$GITHUB_REF" == refs/heads/work/* ]]; then
+            RELEASE_TAG="${VERSION}-dev.${GITHUB_RUN_NUMBER}"
+            IS_PRERELEASE=true
+          else
+            RELEASE_TAG="$VERSION"
+            IS_PRERELEASE=false
+          fi
           echo "Generated Version: $VERSION"
+          echo "Release tag: $RELEASE_TAG (prerelease=$IS_PRERELEASE)"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_OUTPUT
       - name: Install Compiler
         run: |
           curl -o arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
@@ -109,11 +124,11 @@ jobs:
           mv kptools kptools-linux
       
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/work/')
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.parse_version.outputs.VERSION }}
+          tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
           artifacts: |
             kernel/kpimg-linux
             kernel/kpimg-android
@@ -127,6 +142,7 @@ jobs:
           generateReleaseNotes: true
           allowUpdates: true
           replacesArtifacts: true
+          prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
   Build-on-windows:
     runs-on: windows-2022
@@ -143,9 +159,20 @@ jobs:
           $MINOR = (Select-String -Path version -Pattern '#define MINOR').Line.Split(' ')[2]
           $PATCH = (Select-String -Path version -Pattern '#define PATCH').Line.Split(' ')[2]
           $VERSION = "$MAJOR.$MINOR.$PATCH"
+          if ($env:GITHUB_REF -like 'refs/heads/work/*') {
+            $RELEASE_TAG = "$VERSION-dev.$env:GITHUB_RUN_NUMBER"
+            $IS_PRERELEASE = "true"
+          } else {
+            $RELEASE_TAG = $VERSION
+            $IS_PRERELEASE = "false"
+          }
           Write-Output "Generated Version: $VERSION"
           "VERSION=$VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_TAG=$RELEASE_TAG" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "IS_PRERELEASE=$IS_PRERELEASE" | Out-File -FilePath $env:GITHUB_ENV -Append
           Add-Content -Path $env:GITHUB_OUTPUT -Value "VERSION=$VERSION"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "RELEASE_TAG=$RELEASE_TAG"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "IS_PRERELEASE=$IS_PRERELEASE"
       - uses: msys2/setup-msys2@v2
         with:
           update: true
@@ -184,15 +211,16 @@ jobs:
           dir .
 
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/work/')
         uses: ncipollo/release-action@v1.12.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ env.VERSION }}
+          tag: ${{ env.RELEASE_TAG }}
           artifacts: |
             kptools-msys2-win.7z
           allowUpdates: true
           replacesArtifacts: true
+          prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
   Build-on-mac:
     runs-on: macos-latest
@@ -226,15 +254,16 @@ jobs:
           make
           mv kptools kptools-mac
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/work/')
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.parse_version.outputs.VERSION }}
+          tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
           artifacts: |
             tools/build/kptools-mac
           allowUpdates: true
           replacesArtifacts: true
+          prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
   Build-lkm:
     strategy:
@@ -267,20 +296,30 @@ jobs:
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
           VERSION="$MAJOR.$MINOR.$PATCH"
+          if [[ "$GITHUB_REF" == refs/heads/work/* ]]; then
+            RELEASE_TAG="${VERSION}-dev.${GITHUB_RUN_NUMBER}"
+            IS_PRERELEASE=true
+          else
+            RELEASE_TAG="$VERSION"
+            IS_PRERELEASE=false
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_OUTPUT
       - uses: actions/download-artifact@v4
         with:
           pattern: '*-lkm'
           path: lkm-out
           merge-multiple: true
       - name: Release LKM
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/work/')
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.parse_version.outputs.VERSION }}
+          tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
           artifacts: |
             lkm-out/*kernelpatch.ko
           allowUpdates: true
           replacesArtifacts: true
+          prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
