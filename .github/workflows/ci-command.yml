@@ -22,15 +22,27 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           WORKFLOW: build.yml
-          REF: ${{ github.event.issue.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
 
-          if [ "${REF}" = "" ]; then
+          PR_JSON=$(curl --fail-with-body --silent --show-error             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer ${GH_TOKEN}"             -H "X-GitHub-Api-Version: 2026-03-10"             "https://api.github.com/repos/${REPOSITORY}/pulls/${PR_NUMBER}")
+
+          HEAD_REPO=$(jq -r '.head.repo.full_name // empty' <<< "${PR_JSON}")
+          HEAD_REF=$(jq -r '.head.ref // empty' <<< "${PR_JSON}")
+
+          if [ "${HEAD_REPO}" != "${REPOSITORY}" ]; then
+            echo "Refusing to dispatch a PR from a different repository: ${HEAD_REPO}"
+            exit 1
+          fi
+
+          if [ -z "${HEAD_REF}" ]; then
             echo "Missing PR head ref"
             exit 1
           fi
 
-          jq -n --arg ref "${REF}" '{ref: $ref}' > /tmp/dispatch.json
+          jq -n --arg ref "${HEAD_REF}" '{ref: $ref}' > /tmp/dispatch.json
 
           curl --fail-with-body --silent --show-error             -X POST             -H "Accept: application/vnd.github+json"             -H "Authorization: Bearer ${GH_TOKEN}"             -H "X-GitHub-Api-Version: 2026-03-10"             "https://api.github.com/repos/${REPOSITORY}/actions/workflows/${WORKFLOW}/dispatches"             -d @/tmp/dispatch.json
+
+          echo "Dispatched ${WORKFLOW} for ${REPOSITORY}@${HEAD_REF}"
