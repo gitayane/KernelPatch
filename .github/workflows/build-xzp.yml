@@ -71,7 +71,7 @@ jobs:
           do
             curl -L --fail \
               -o "lkm/${KMI}_kernelpatch.ko" \
-              "https://github.com/gitayane/KernelPatch/releases/download/0.13.9/${KMI}_kernelpatch.ko"
+              "https://github.com/gitayane/KernelPatch/releases/download/0.13.9-xzp1/${KMI}_kernelpatch.ko"
           done
 
       - name: Prepare release metadata
