@@ -1,0 +1,104 @@
+name: Build XZP trusted-manager release
+
+on:
+  push:
+    branches:
+      - "feat/xzp-manager-trust-0.13.9-xzp2"
+
+permissions:
+  contents: write
+
+jobs:
+  build-xzp:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install compiler
+        run: |
+          curl -L --fail -o arm-gnu-toolchain.tar.xz \\
+            https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
+          tar -Jxf arm-gnu-toolchain.tar.xz
+
+      - name: Build kpimg-android
+        run: |
+          export TARGET_COMPILE="$PWD/arm-gnu-toolchain-12.2.rel1-aarch64-none-elf/bin/aarch64-none-elf-"
+          cd kernel
+          export ANDROID=1
+          make hdr kpimg
+          mv kpimg kpimg-android
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - name: Build kptools-android
+        run: |
+          cd tools
+          mkdir -p build/android
+          cd build/android
+          cmake \\
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \\
+            -DCMAKE_BUILD_TYPE=Release \\
+            -DANDROID_PLATFORM=android-33 \\
+            -DANDROID_ABI=arm64-v8a \\
+            ../..
+          cmake --build .
+          "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" kptools
+          mv kptools kptools-android
+
+      - name: Reuse compatible LKM assets
+        run: |
+          set -euo pipefail
+          mkdir -p lkm
+          for KMI in \
+            android12-5.10 \
+            android13-5.10 \
+            android13-5.15 \
+            android14-5.15 \
+            android14-6.1 \
+            android15-6.6 \
+            android16-6.12
+          do
+            curl -L --fail \\
+              -o "lkm/${KMI}_kernelpatch.ko" \\
+              "https://github.com/gitayane/KernelPatch/releases/download/0.13.9/${KMI}_kernelpatch.ko"
+          done
+
+      - name: Prepare release metadata
+        run: |
+          echo "VERSION=0.13.9-xzp2" >> "$GITHUB_ENV"
+          echo "Release assets:"
+          ls -lh kernel/kpimg-android tools/build/android/kptools-android lkm/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: KernelPatch-XZP-${{ env.VERSION }}
+          path:
+            kernel/kpimg-android
+            tools/build/android/kptools-android
+            lkm/*.ko
+
+      - name: Release
+        uses: ncipollo/release-action@v1.14.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ env.VERSION }}
+          name: KernelPatch ${{ env.VERSION }}
+          artifacts:
+            kernel/kpimg-android
+            tools/build/android/kptools-android
+            lkm/*.ko
+          generateReleaseNotes: true
+          allowUpdates: true
+          replacesArtifacts: true
+          prerelease: true
+          makeLatest: false
