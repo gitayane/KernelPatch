@@ -84,7 +84,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: KernelPatch-XZP-${{ env.VERSION }}
-          path:
+          path: |
             kernel/kpimg-android
             tools/build/android/kptools-android
             lkm/*.ko
@@ -95,7 +95,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ env.VERSION }}
           name: KernelPatch ${{ env.VERSION }}
-          artifacts:
+          artifacts: |
             kernel/kpimg-android
             tools/build/android/kptools-android
             lkm/*.ko
