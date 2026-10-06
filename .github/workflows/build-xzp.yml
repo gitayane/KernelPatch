@@ -20,7 +20,7 @@ jobs:
 
       - name: Install compiler
         run: |
-          curl -L --fail -o arm-gnu-toolchain.tar.xz \\
+          curl -L --fail -o arm-gnu-toolchain.tar.xz \
             https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
           tar -Jxf arm-gnu-toolchain.tar.xz
 
@@ -44,11 +44,11 @@ jobs:
           cd tools
           mkdir -p build/android
           cd build/android
-          cmake \\
-            -DCMAKE_TOOLCHAIN_FILE="${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \\
-            -DCMAKE_BUILD_TYPE=Release \\
-            -DANDROID_PLATFORM=android-33 \\
-            -DANDROID_ABI=arm64-v8a \\
+          cmake \
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID_PLATFORM=android-33 \
+            -DANDROID_ABI=arm64-v8a \
             ../..
           cmake --build .
           "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" kptools
@@ -67,8 +67,8 @@ jobs:
             android15-6.6 \
             android16-6.12
           do
-            curl -L --fail \\
-              -o "lkm/${KMI}_kernelpatch.ko" \\
+            curl -L --fail \
+              -o "lkm/${KMI}_kernelpatch.ko" \
               "https://github.com/gitayane/KernelPatch/releases/download/0.13.9/${KMI}_kernelpatch.ko"
           done
 
