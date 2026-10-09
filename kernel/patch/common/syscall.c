@@ -621,6 +621,7 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 
 extern void kp_syscall_4_4_fast_entry(void);
 extern void kp_syscall_4_4_trace_entry(void);
+extern void __noreturn kp_syscall_4_4_exit(struct pt_regs *regs, long value, uintptr_t target);
 
 static uintptr_t syscall_4_4_fast_site;
 static uintptr_t syscall_4_4_trace_site;
@@ -795,12 +796,8 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
     if (!target)
         target = trace ? syscall_4_4_trace_site + 12 : 0;
 
-    if (target) {
-        if (trace)
-            ((void (*)(void))target)();
-        else
-            ((void (*)(long))target)(ret);
-    }
+    if (target)
+        kp_syscall_4_4_exit(regs, ret, target);
     __builtin_unreachable();
 }
 
