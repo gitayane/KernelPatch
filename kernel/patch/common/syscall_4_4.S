@@ -28,9 +28,7 @@
 kp_syscall_4_4_fast_entry:
     kp_syscall_4_4_save
     add x0, sp, #96
-    ldr x1, [x0, #S_ORIG_X0]
-    /* The syscall number is saved in pt_regs; do not trust x26 after C calls. */
-    ldr x1, [x0, #S_SYSCALLNO]
+    mov x1, x26
     b kp_syscall_4_4_fast_dispatch
     .size kp_syscall_4_4_fast_entry, .-kp_syscall_4_4_fast_entry
 
@@ -39,7 +37,7 @@ kp_syscall_4_4_fast_entry:
 kp_syscall_4_4_trace_entry:
     kp_syscall_4_4_save
     add x0, sp, #96
-    ldr x1, [x0, #S_SYSCALLNO]
+    mov x1, x26
     b kp_syscall_4_4_trace_dispatch
     .size kp_syscall_4_4_trace_entry, .-kp_syscall_4_4_trace_entry
 
