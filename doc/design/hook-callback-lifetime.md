@@ -357,3 +357,43 @@ Direct replacement hooks (`hook()/unhook()`) require their own ownership
 tracking and teardown contract; they must not be implied safe by the callback
 registry. A partial syscall-only conversion without an unload restriction is
 not an acceptable safety fix.
+
+### Follow-up: module address ownership and publication audit (2026-10-11)
+
+The module loader's current layout makes callback-owner detection feasible for
+normal KPM function pointers, but only as a registration-time operation:
+
+- `move_module()` allocates `mod->start` for `mod->size` bytes and relocates
+  allocated ELF sections into that allocation. `mod->text_size` marks the
+  executable portion; `mod->ro_size` marks the end of the read-only portion.
+- A callback function must be in the executable interval
+  `[start, start + text_size)`, not merely anywhere in `[start, start + size)`.
+  A userdata pointer is not evidence of callback ownership: KPMs may pass
+  kernel-owned or separately allocated userdata.
+- Before doing pointer-range arithmetic, validate non-null `start`, nonzero
+  `text_size`, and overflow-safe bounds. A callback pointer outside all
+  registered KPM text ranges is core/external code or unknown; it must not be
+  silently assigned to whichever module is being loaded or unloaded.
+- The resolved owner must be retained through a stable module reference/state
+  protocol. Looking up the owner again from a callback address after unload
+  has started is unsafe because the module allocation can be freed or reused.
+
+The module-list publication path is also not serialized as a whole. The loader
+checks `find_module(info->info.name)` before allocating and linking the new
+module, while `find_module()` itself traverses `modules.list` without taking
+the declared `module_lock`. Two concurrent loads can therefore both pass the
+duplicate-name check. Fixing only `unload_module()` would leave this race and
+could make any module-owner registry inconsistent.
+
+This yields two prerequisites for a runtime patch:
+
+1. Make module lookup/duplicate-check/publication/removal a single coherent
+   list-locking protocol, while never invoking `init`, `exit`, `ctl0`,
+   `ctl1`, or event callbacks under the list lock.
+2. Add owner references at registration time using the executable text range,
+   and make registration fail closed if the callback owner is ambiguous or
+   already unloading. Do not infer ownership from `userdata` or from a
+   broad module allocation range.
+
+This audit is still design-only. It does not change the module list, callback
+registration, or unload behavior.
