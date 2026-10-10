@@ -218,3 +218,32 @@ chains. The smallest coherent runtime change needs:
 Until these four pieces are grounded, the correct result is to keep this branch
 design-only rather than land a partial counter/RCU fix that could still execute
 freed KPM code.
+
+
+### Follow-up: sleep/wakeup API verification
+
+A deeper read of the checked-in compatibility headers refined the earlier result:
+
+- `kernel/linux/include/linux/sched.h` declares
+  `schedule_timeout_uninterruptible()` and `wake_up_process()`.
+- `kernel/linux/arch/arm64/include/asm/current.h` provides a target-layout-aware
+  `current` accessor.
+- However, the available compatibility declarations do not expose the normal
+  `set_current_state()` / `__set_current_state()` helpers or the
+  `TASK_UNINTERRUPTIBLE` state definitions, and this tree does not include the
+  usual wait-queue API. Merely calling `schedule_timeout_uninterruptible()`
+  is not a correct wait protocol unless the current task state is prepared
+  correctly. A hand-written task-state update based on guessed offsets would be
+  unsafe, especially because this project supports kernels with different
+  task layouts.
+
+The safe options still to verify are:
+
+1. whether KP's target-symbol resolver can safely expose the actual task-state
+   helpers and their constants for this build; or
+2. whether a bounded, explicit sleep/poll abstraction can be implemented using
+   supported scheduler interfaces without depending on private task offsets.
+
+The implementation must also avoid sleeping while holding a spinlock, during
+atomic/interrupt context, or from a callback that is attempting to drain itself.
+No scheduler code has been changed in this commit.
