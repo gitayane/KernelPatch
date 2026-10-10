@@ -860,15 +860,28 @@ static int syscall_dispatch_4_4_init(void)
 
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
-        log_boot("4.4 dispatcher: fast site patch rc=%d\\n", rc);
+        /*
+         * The legacy aarch64_insn_patch_text() backend writes instructions in
+         * sequence and may fail after a partial write. Restore the entire site
+         * before falling back to the per-syscall hook path.
+         */
+        int restore_rc = hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
+        log_boot("4.4 dispatcher: fast site patch rc=%d, restore rc=%d\\n", rc, restore_rc);
+        syscall_4_4_fast_site = 0;
+        syscall_4_4_trace_site = 0;
         return rc;
     }
 
     rc = hotpatch(trace_addrs, trace_patch, 3);
     if (rc) {
-        /* Roll back the fast site if the trace site could not be patched. */
-        hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
-        log_boot("4.4 dispatcher: trace site patch rc=%d, fast site restored\\n", rc);
+        /*
+         * The trace patch can also be partially installed. Restore it first,
+         * then roll back the already-installed fast site.
+         */
+        int trace_restore_rc = hotpatch(trace_addrs, syscall_4_4_trace_backup, 3);
+        int fast_restore_rc = hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
+        log_boot("4.4 dispatcher: trace site patch rc=%d, trace restore rc=%d, fast restore rc=%d\\n",
+                 rc, trace_restore_rc, fast_restore_rc);
         syscall_4_4_fast_site = 0;
         syscall_4_4_trace_site = 0;
         return rc;
