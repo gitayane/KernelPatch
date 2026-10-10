@@ -247,3 +247,34 @@ The safe options still to verify are:
 The implementation must also avoid sleeping while holding a spinlock, during
 atomic/interrupt context, or from a callback that is attempting to drain itself.
 No scheduler code has been changed in this commit.
+
+
+### Follow-up: what symbol resolution can and cannot provide
+
+The resolver in `kernel/patch/include/ksyms.h` resolves named addresses through
+`kallsyms_lookup_name_by_suffix()`; the `kfunc` declarations are function
+pointer slots populated by the symbol-matching path. This can discover a real
+function symbol if the target kernel exposes it under a matching name. It
+cannot discover a C preprocessor macro or an enum/constant such as
+`TASK_UNINTERRUPTIBLE`: those have no runtime symbol address to resolve.
+
+Consequently, the resolver is not a way to recover `set_current_state()` or
+task-state constants if the target compiler emitted them as inline operations
+or compile-time values. Nor should a guessed `task_struct` state offset be
+introduced as a substitute.
+
+The compatibility header declares `schedule_timeout_uninterruptible()` and
+`wake_up_process()`, but the declaration alone does not prove that the exact
+target kernel exports a callable symbol with that name, or that its calling
+contract is suitable for every caller. Before a wait abstraction uses it, the
+implementation must verify the actual target symbol and semantics for the
+supported 4.4.302 build, and restrict sleeping to a context known to permit it.
+A timed sleep/poll loop could be considered only in the process-context unload
+path, outside locks and RCU sections, with self-unload explicitly rejected;
+it is not a general callback-side wait primitive.
+
+**Decision:** do not add scheduler symbol declarations or task-state offsets
+just to make a counter-based drain compile. The next runtime patch should first
+introduce stable registration records and owner tracking with nonblocking
+reference acquisition/release; module draining should be wired in only after a
+target-verified wait strategy and callback-context contract are established.
