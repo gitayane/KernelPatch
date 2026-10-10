@@ -397,3 +397,49 @@ This yields two prerequisites for a runtime patch:
 
 This audit is still design-only. It does not change the module list, callback
 registration, or unload behavior.
+
+
+### Follow-up: initialization and control-call lifetime audit (2026-10-11)
+
+Two additional ordering problems must be handled before owner tracking can be
+implemented correctly.
+
+**A KPM can register hooks before it is discoverable in the module list.**
+In `load_module_ex()`, the loader relocates the module, calls `mod->init()`,
+and only after successful return adds `mod->list` to `modules.list`. A KPM
+init function can call exported hook APIs during that interval. Therefore,
+resolving callback ownership only by scanning the published module list will
+fail to find the module that is currently initializing. Treating that callback
+as core/unknown would either lose the owner association or force an unsafe
+fallback.
+
+The implementation needs an explicit LOADING/INITIALIZING module registry or
+an equivalent registration context that is visible to hook registration before
+`mod->init()` runs. That state must participate in duplicate-name exclusion
+and owner resolution, but it must not make a half-initialized KPM appear as a
+normal loaded module to control/event callers. If init fails after registering
+hooks, the failure path must drain/unregister those registrations before
+freeing `mod->start`; calling `mod->exit()` alone cannot be assumed to remove
+every hook unless the API contract enforces that behavior.
+
+**Module control paths have their own shared-state race.** `module_control0()`
+frees and replaces `mod->ctl_args` before calling `ctl0`, while the current
+module-list lock is not used to serialize control calls or protect the module
+from concurrent unload. Two simultaneous control calls can race on
+`ctl_args`, and an unload can free the module while a control/event callback
+is active. The lifetime protocol must pin the module across each control/event
+callback, and `ctl_args` must either be per-call storage or protected by a
+separate serialization rule. Do not solve this by holding the module-list
+spinlock while invoking arbitrary KPM code.
+
+Updated minimum module states: `LOADING` (owner resolution allowed, normal
+control/event lookup disallowed), `LIVE` (normal operations allowed),
+`UNLOADING` (new registrations and normal invocations rejected), and
+`DEAD` (eligible for reclamation only after every module/callback reference
+has drained). State publication and duplicate-name exclusion need one coherent
+locking protocol; callback execution remains outside that lock.
+
+These findings further rule out a narrow fix to `unload_module()` or to the
+syscall hook table alone. The initialization path, all hook families, control
+calls, event iteration, and module-list publication must agree on the same
+owner/lifetime contract.
