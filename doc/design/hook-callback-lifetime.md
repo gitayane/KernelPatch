@@ -278,3 +278,82 @@ just to make a counter-based drain compile. The next runtime patch should first
 introduce stable registration records and owner tracking with nonblocking
 reference acquisition/release; module draining should be wired in only after a
 target-verified wait strategy and callback-context contract are established.
+
+
+### Follow-up: concrete registry protocol before runtime integration
+
+The first runtime change must not put references in the existing fixed hook slots
+and then free/reuse those slots immediately. A dispatcher may already have
+copied a slot index, so slot-local counters alone do not identify the same
+registration after reuse. The implementation should use stable registration
+objects whose addresses remain valid until all readers that could have observed
+them have left the registry's read-side protocol.
+
+The minimum record contract is:
+
+```c
+struct kp_hook_registration {
+    /* immutable after publication */
+    void *before;
+    void *after;
+    void *userdata;
+    struct module *owner; /* pinned by module-level lifetime protocol */
+    unsigned long generation;
+
+    /* protected by registry lock */
+    unsigned int state;   /* NEW, LIVE, DRAINING, DEAD */
+    unsigned int active;  /* callback bodies currently executing */
+    unsigned int reserved;/* dispatch/pair snapshots retaining this record */
+    struct list_head registry_node;
+    struct list_head owner_node;
+};
+```
+
+This is a contract sketch, not a header to copy verbatim: field widths,
+atomic operations, allocator choice, and list types must match the actual KP
+headers. In particular, `owner` cannot be a raw pointer whose module metadata
+may be freed while a registration is still reachable.
+
+Required transition rules:
+
+1. Allocate and fully initialize a record before publication. Publish it as
+   LIVE while holding the registry lock, and reject registration if its owner
+   has entered UNLOADING.
+2. A dispatcher reserves the record under the same lock used by removal before
+   retaining it in a snapshot. The reservation prevents reclamation; it does
+   not by itself authorize callback entry.
+3. Immediately before invoking a callback, under the registry lock verify
+   LIVE (or a specifically documented paired-after state), validate generation,
+   and increment `active`. Drop the lock before calling module code.
+4. After return, decrement `active` under the lock. Release the snapshot
+   reservation independently when the dispatcher can no longer use the record.
+5. Removal marks DRAINING under the lock, preventing fresh reservations and
+   ordinary callback entry. It then waits for `active == 0` and
+   `reserved == 0` outside the lock and outside RCU. Only then may it unlink
+   the record from owner/global lists and reclaim it.
+6. A before/after pair must reserve both callbacks' lifetime before the origin
+   executes, but must not keep an executing-callback reference over the origin
+   syscall. The after policy must be explicit if removal races with the origin.
+7. Synchronous removal from the same active callback must return a defined
+   error or defer reclamation; it must not wait for its own `active` reference.
+8. The module must remain allocated while any registration or control/event
+   invocation refers to it. A module reference alone is insufficient unless
+   every callback entry path participates in the same protocol.
+
+The current APIs expose no single primitive that safely waits for a condition
+in all callback contexts. Therefore this protocol is split deliberately:
+registry reservation/entry/exit are nonblocking and lock-bounded; draining is
+a process-context operation with a separately verified wait implementation.
+The unload API must reject contexts that cannot sleep, and must reject or defer
+self-unload. Do not silently turn the drain into a spin loop.
+
+### Scope gate for the first runtime patch
+
+The first implementation must either convert all three callback-dispatch
+families (syscall, inline chain, FP chain) and module control/event entry paths
+together, or introduce an explicit capability/ownership registry that makes
+unload fail safely when a module has registered an unsupported hook type.
+Direct replacement hooks (`hook()/unhook()`) require their own ownership
+tracking and teardown contract; they must not be implied safe by the callback
+registry. A partial syscall-only conversion without an unload restriction is
+not an acceptable safety fix.
