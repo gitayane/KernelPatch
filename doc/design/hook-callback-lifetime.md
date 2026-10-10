@@ -443,3 +443,34 @@ These findings further rule out a narrow fix to `unload_module()` or to the
 syscall hook table alone. The initialization path, all hook families, control
 calls, event iteration, and module-list publication must agree on the same
 owner/lifetime contract.
+
+
+### Follow-up: refined drain-wait options (2026-10-11)
+
+The compatibility tree also declares `wait_task_inactive(struct task_struct *,
+long)`, but that API waits for a particular task to leave a matching scheduler
+state; it is not a wait-on-counter primitive and must not be repurposed for
+callback draining.
+
+A less invasive candidate is the real target-kernel function
+`schedule_timeout_uninterruptible(long)`. In Linux 4.4 this helper sets the
+current task to the uninterruptible state before scheduling, so callers do not
+need to write a guessed `task_struct` state offset. However, the declaration
+in this compatibility subset alone does not establish that the exact target
+exports a matching symbol, nor does it prove the current caller is in sleepable
+process context.
+
+If target verification confirms the symbol and contract, a process-context
+unload path could use a bounded sleep/poll loop that:
+- checks the drain condition under the registry lock;
+- releases all locks and RCU read-side sections before sleeping;
+- uses a short timeout so missed wakeups do not cause an indefinite wait;
+- rechecks the condition after every wake/timeout;
+- rejects self-unload and contexts that cannot sleep.
+
+This would be a fallback polling strategy, not a replacement for the registry's
+atomic reference protocol. It must never be used by hook dispatchers or while
+holding the registry/module spinlock. Before implementation, confirm the
+symbol on the actual G8142 4.4.302 target (for example through its kallsyms
+resolver/logging) and ensure timeout units and the callable ABI match the
+compatibility declaration. No runtime wait code is added by this audit.
