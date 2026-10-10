@@ -625,6 +625,8 @@ extern void __noreturn kp_syscall_4_4_exit(struct pt_regs *regs, long value, uin
 
 static uintptr_t syscall_4_4_fast_site;
 static uintptr_t syscall_4_4_trace_site;
+/* Set if a failed patch could not be fully rolled back; avoid fallback hooks then. */
+static volatile int syscall_4_4_patch_broken;
 static uintptr_t syscall_4_4_fast_return;
 static uintptr_t syscall_4_4_trace_return;
 static uint32_t syscall_4_4_fast_backup[3];
@@ -867,6 +869,7 @@ static int syscall_dispatch_4_4_init(void)
          */
         int restore_rc = hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
         log_boot("4.4 dispatcher: fast site patch rc=%d, restore rc=%d\\n", rc, restore_rc);
+        if (restore_rc) syscall_4_4_patch_broken = 1;
         syscall_4_4_fast_site = 0;
         syscall_4_4_trace_site = 0;
         return rc;
@@ -882,6 +885,7 @@ static int syscall_dispatch_4_4_init(void)
         int fast_restore_rc = hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
         log_boot("4.4 dispatcher: trace site patch rc=%d, trace restore rc=%d, fast restore rc=%d\\n",
                  rc, trace_restore_rc, fast_restore_rc);
+        if (trace_restore_rc || fast_restore_rc) syscall_4_4_patch_broken = 1;
         syscall_4_4_fast_site = 0;
         syscall_4_4_trace_site = 0;
         return rc;
@@ -907,6 +911,10 @@ void syscall_dispatch_init(void)
          */
         if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
             if (syscall_dispatch_4_4_init() == 0) return;
+            if (syscall_4_4_patch_broken) {
+                log_boot("4.4 dispatcher: rollback failed; refusing per-syscall fallback\n");
+                return;
+            }
         }
         log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
         return;
