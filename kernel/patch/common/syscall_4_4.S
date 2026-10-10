@@ -28,7 +28,7 @@
 kp_syscall_4_4_fast_entry:
     kp_syscall_4_4_save
     add x0, sp, #96
-    mov x1, x26
+    mov x1, x25
     b kp_syscall_4_4_fast_dispatch
     .size kp_syscall_4_4_fast_entry, .-kp_syscall_4_4_fast_entry
 
@@ -37,7 +37,7 @@ kp_syscall_4_4_fast_entry:
 kp_syscall_4_4_trace_entry:
     kp_syscall_4_4_save
     add x0, sp, #96
-    mov x1, x26
+    mov x1, x25
     b kp_syscall_4_4_trace_dispatch
     .size kp_syscall_4_4_trace_entry, .-kp_syscall_4_4_trace_entry
 
