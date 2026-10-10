@@ -497,41 +497,23 @@ static long syscall_dispatch_nr(struct pt_regs *regs, unsigned long scno, int is
  * read the register frame rather than the struct's args[], but keeping the
  * buffer large enough means a callback that does read args->arg4..7 directly
  * stays in bounds. */
-static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
+/*
+ * Run the before callbacks from a caller-owned snapshot. The Linux 4.4 backend
+ * keeps this snapshot on its syscall stack and reuses it after the original
+ * handler, so gate decisions and callback membership cannot drift mid-syscall.
+ */
+static void syscall_dispatch_before_snapshot(hook_fargs8_t *args, struct pt_regs *regs, long nr,
+                                             struct syscall_hook_snapshot *snap, int n)
 {
-    (void)udata;
-    struct pt_regs *regs = (struct pt_regs *)args->arg0;
-    if (!regs) return;
+    if (!regs || !n) return;
 
-    int is_compat = compat_user_mode(regs) ? 1 : 0;
-    long nr = syscall_dispatch_nr(regs, args->arg1, is_compat);
-
-    if (!syscall_hook_high) return;
-
-    /* One uid gate, evaluated once per syscall for every callback, instead of a
-     * root check inside each callback. For a process that is not su-authorized
-     * nothing is dispatched, so behavior and cost are the same across all
-     * syscalls: no per-syscall fingerprint, and fstatat/statx/... cannot
-     * disagree. Slots registered with bypass_gate (the magic supercall, which
-     * authenticates with its own key) still run. */
-    int gate_ok = 1;
-    if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
-
-    struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
-    int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
-    if (!n) return;
-
-    /* Hooked at invoke_syscall (handler granularity) el0_svc_common has already
-     * set these; hooked at its entry we must set them ourselves so callbacks
-     * that inspect them (resolve_pt_regs scans the stack for a matching frame)
-     * see the same state as under the per-syscall hook. */
+    /* At invoke_syscall granularity these are already set; at el0_svc_common
+     * entry, set them so callbacks observe the same state as per-syscall hooks. */
     if (!syscall_hook_handler_granular) {
         regs->orig_x0 = regs->regs[0];
         regs->syscallno = nr;
     }
 
-    /* arg1..arg3 are scno/sc_nr/table, not syscall arguments; they must reach the
-     * origin unchanged for it to pick the right handler. */
     uint64_t keep_arg1 = args->arg1;
     uint64_t keep_arg2 = args->arg2;
     uint64_t keep_arg3 = args->arg3;
@@ -549,12 +531,6 @@ static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
     args->arg2 = keep_arg2;
     args->arg3 = keep_arg3;
 
-    /* Honour skip_origin only where it means "skip this one syscall's handler".
-     * At invoke_syscall granularity el0_svc_common still runs syscall_trace_enter
-     * and syscall_trace_exit around it, so the overridden result has to be placed
-     * in regs->regs[0] here. When hooked at el0_svc_common's entry, skip_origin
-     * would skip that whole function (tracing, exit work and all), so it is
-     * refused unless the caller explicitly opted in. */
     if (args->skip_origin && can_skip && syscall_hook_handler_granular) {
         regs->regs[0] = args->ret;
     } else {
@@ -562,40 +538,53 @@ static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
     }
 }
 
-static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
+static void syscall_dispatch_after_snapshot(hook_fargs8_t *args, struct pt_regs *regs,
+                                            struct syscall_hook_snapshot *snap, int n)
 {
-    (void)udata;
-    struct pt_regs *regs = (struct pt_regs *)args->arg0;
-    if (!regs) return;
+    if (!regs || !n) return;
 
-    int is_compat = compat_user_mode(regs) ? 1 : 0;
-    /* Use the scno captured by the transit at function entry, not regs->syscallno:
-     * el0_svc_common only assigns syscallno for in-range syscalls, so an invalid
-     * number would leave the previous syscall's value there and we would run the
-     * wrong afters. args->arg1 is the original scno; callbacks that rewrite a
-     * syscall argument go through set_syscall_argn(), which touches regs->regs[],
-     * not this copy. */
-    long nr = syscall_dispatch_nr(regs, args->arg1, is_compat);
-
-    if (!syscall_hook_high) return;
-
-    /* Same gate as the before phase: an after callback must never run without
-     * its before callback having run. */
-    int gate_ok = 1;
-    if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
-
-    struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
-    int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
-    if (!n) return;
-
-    /* The real return value lives in regs->regs[0]; el0_svc_common returns void,
-     * so mirror it into fargs->ret for the after callbacks and copy any change
-     * back, matching the fp-hook chain semantics. */
+    /* The real return value lives in regs->regs[0]; el0_svc_common returns void. */
     args->ret = regs->regs[0];
     for (int i = n - 1; i >= 0; i--) {
         if (snap[i].after) snap[i].after(args, snap[i].udata);
     }
     regs->regs[0] = args->ret;
+}
+
+static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
+{
+    (void)udata;
+    struct pt_regs *regs = (struct pt_regs *)args->arg0;
+    if (!regs || !syscall_hook_high) return;
+
+    int is_compat = compat_user_mode(regs) ? 1 : 0;
+    long nr = syscall_dispatch_nr(regs, args->arg1, is_compat);
+
+    int gate_ok = 1;
+    if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
+
+    struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
+    int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
+    syscall_dispatch_before_snapshot(args, regs, nr, snap, n);
+}
+
+static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
+{
+    (void)udata;
+    struct pt_regs *regs = (struct pt_regs *)args->arg0;
+    if (!regs || !syscall_hook_high) return;
+
+    int is_compat = compat_user_mode(regs) ? 1 : 0;
+    long nr = syscall_dispatch_nr(regs, args->arg1, is_compat);
+
+    /* Generic hook chains still collect here independently; the Linux 4.4
+     * backend below explicitly shares one snapshot across both phases. */
+    int gate_ok = 1;
+    if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
+
+    struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
+    int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
+    syscall_dispatch_after_snapshot(args, regs, snap, n);
 }
 
 
@@ -751,7 +740,9 @@ static long syscall_4_4_invoke_original(struct pt_regs *regs, long nr, int is_co
 static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace)
 {
     hook_fargs8_t fargs;
+    struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
     int is_compat;
+    int n = 0;
     long ret;
     uintptr_t target;
 
@@ -777,7 +768,18 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
     fargs.arg6 = 0;
     fargs.arg7 = 0;
 
-    syscall_dispatch_before(&fargs, 0);
+    /*
+     * Collect once before callbacks run. Reusing this stack snapshot for after
+     * callbacks keeps both the UID-gate decision and callback membership stable
+     * across the original syscall, even if credentials or registrations change.
+     */
+    if (syscall_hook_high) {
+        int gate_ok = 1;
+        if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
+        n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
+    }
+
+    syscall_dispatch_before_snapshot(&fargs, regs, (long)nr, snap, n);
 
     if (fargs.skip_origin && syscall_hook_handler_granular) {
         ret = (long)regs->regs[0];
@@ -786,12 +788,7 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
         regs->regs[0] = ret;
     }
 
-    /*
-     * Keep the same after-hook semantics as the upstream dispatcher. This is
-     * also what lets a before hook use set_syscall_argn() and an after hook
-     * rewrite regs->regs[0].
-     */
-    syscall_dispatch_after(&fargs, 0);
+    syscall_dispatch_after_snapshot(&fargs, regs, snap, n);
     ret = (long)regs->regs[0];
 
     target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
