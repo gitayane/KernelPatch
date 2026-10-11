@@ -907,11 +907,13 @@ void syscall_dispatch_init(void)
          * other kernels preserve the existing per-syscall fallback.
          */
         if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
-            if (syscall_dispatch_4_4_init() == 0) return;
-            if (syscall_4_4_patch_broken) {
-                log_boot("4.4 dispatcher: rollback failed; refusing per-syscall fallback\n");
-                return;
-            }
+            /*
+             * Diagnostic isolation build: retain the known-good 4.4
+             * per-syscall hook path and do not patch el0_svc syscall entry.
+             * This tests whether the new 4.4 global dispatcher is responsible
+             * for the XZP zygote-fatal reboot.
+             */
+            log_boot("4.4 dispatcher disabled for isolation; use per-syscall hooks\\n");
         }
         log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
         return;
