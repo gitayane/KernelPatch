@@ -6,6 +6,7 @@ on:
       - main
       - 'release/**'
       - 'work/**'
+      - 'debug/**'
   workflow_call:
   workflow_dispatch:
 
@@ -73,6 +74,15 @@ jobs:
           cd ../demo-syscallhook
           make
           mv syscallhook.kpm demo-syscallhook.kpm
+
+      - name: Upload diagnostic kpimg (no release)
+        if: startsWith(github.ref, 'refs/heads/debug/')
+        uses: actions/upload-artifact@v4
+        with:
+          path: |
+            kernel/kpimg-android
+            kernel/kpimg.elf-android
+          name: kpimg-diagnostic
 
       - name: Upload elf
         uses: actions/upload-artifact@v4
