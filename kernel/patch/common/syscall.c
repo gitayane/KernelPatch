@@ -621,6 +621,7 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 
 extern void kp_syscall_4_4_fast_entry(void);
 extern void kp_syscall_4_4_trace_entry(void);
+extern void __noreturn kp_syscall_4_4_resume(uintptr_t frame, long ret, uintptr_t target);
 
 static uintptr_t syscall_4_4_fast_site;
 static uintptr_t syscall_4_4_trace_site;
@@ -745,7 +746,7 @@ static long syscall_4_4_invoke_original(struct pt_regs *regs, long nr, int is_co
     );
 }
 
-static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace)
+static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace, uintptr_t frame)
 {
     hook_fargs8_t fargs;
     int is_compat;
@@ -753,10 +754,8 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
     uintptr_t target;
 
     if (!regs) {
-        target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
-        if (target)
-            ((void (*)(long))target)(-ENOSYS);
-        __builtin_unreachable();
+        ret = -ENOSYS;
+        goto resume;
     }
 
     is_compat = compat_user_mode(regs) ? 1 : 0;
@@ -791,16 +790,13 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
     syscall_dispatch_after(&fargs, 0);
     ret = (long)regs->regs[0];
 
+resume:
     target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
     if (!target)
-        target = trace ? syscall_4_4_trace_site + 12 : 0;
+        target = trace ? syscall_4_4_trace_site + 12 : syscall_4_4_fast_return;
 
-    if (target) {
-        if (trace)
-            ((void (*)(void))target)();
-        else
-            ((void (*)(long))target)(ret);
-    }
+    /* This helper restores SP and x19-x30 before branching to the kernel path. */
+    kp_syscall_4_4_resume(frame, ret, target);
     __builtin_unreachable();
 }
 
@@ -808,15 +804,15 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
  * The assembly entry labels are intentionally separate so the return address
  * can be chosen without touching the 4.4 entry stack/register convention.
  */
-void __noreturn kp_syscall_4_4_fast_dispatch(struct pt_regs *regs, unsigned long nr)
+void __noreturn kp_syscall_4_4_fast_dispatch(struct pt_regs *regs, unsigned long nr, uintptr_t frame)
 {
-    syscall_4_4_dispatch(regs, nr, 0);
+    syscall_4_4_dispatch(regs, nr, 0, frame);
     __builtin_unreachable();
 }
 
-void __noreturn kp_syscall_4_4_trace_dispatch(struct pt_regs *regs, unsigned long nr)
+void __noreturn kp_syscall_4_4_trace_dispatch(struct pt_regs *regs, unsigned long nr, uintptr_t frame)
 {
-    syscall_4_4_dispatch(regs, nr, 1);
+    syscall_4_4_dispatch(regs, nr, 1, frame);
     __builtin_unreachable();
 }
 
