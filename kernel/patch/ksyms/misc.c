@@ -80,6 +80,10 @@ void _linux_kernel_cred_sym_match(const char *name, unsigned long addr)
 // kernel/locking/spinlock.c
 #include <linux/spinlock.h>
 
+/* KPM callback draining may need a sleepable wait outside all KP locks. */
+long kfunc_def(schedule_timeout_uninterruptible)(long timeout) = 0;
+int kfunc_def(wake_up_process)(struct task_struct *tsk) = 0;
+
 int kfunc_def(_raw_spin_trylock)(raw_spinlock_t *lock) = 0;
 int kfunc_def(_raw_spin_trylock_bh)(raw_spinlock_t *lock) = 0;
 void kfunc_def(_raw_spin_lock)(raw_spinlock_t *lock) = 0;
@@ -139,6 +143,12 @@ void _linux_locking_spinlock_sym_match(const char *name, unsigned long addr)
     // kfunc_match(_raw_write_unlock_irqrestore, name, addr);
     // kfunc_match(_raw_write_unlock_irq, name, addr);
     // kfunc_match(_raw_write_unlock_bh, name, addr);
+}
+
+static void _linux_sched_lifetime_sym_match(const char *name, unsigned long addr)
+{
+    kfunc_match(schedule_timeout_uninterruptible, name, addr);
+    kfunc_match(wake_up_process, name, addr);
 }
 
 // kernel/fork.c
@@ -868,6 +878,7 @@ static int _linux_misc_symbol_init(void *data, const char *name, struct module *
     _linux_rcu_symbol_init(name, addr);
     _linux_seccomp_sym_match(name, addr);
     _linux_sched_mm_init(name, addr);
+    _linux_sched_lifetime_sym_match(name, addr);
     return 0;
 }
 
@@ -878,4 +889,6 @@ void linux_misc_symbol_init()
 #else
     kallsyms_on_each_symbol(_linux_misc_symbol_init, 0);
 #endif
+    log_boot("lifecycle wait symbols: schedule_timeout_uninterruptible=%d wake_up_process=%d\n",
+             !!kfunc(schedule_timeout_uninterruptible), !!kfunc(wake_up_process));
 }
