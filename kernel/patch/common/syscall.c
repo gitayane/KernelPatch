@@ -979,9 +979,11 @@ static int syscall_dispatch_4_4_init(void)
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
     int required_wrappers = compat_sys_call_table
         ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
-    if (special_wrappers < required_wrappers) {
-        log_boot("4.4 dispatcher: only %d/%d required special wrappers resolved; keep per-syscall hooks\n",
-                 special_wrappers, required_wrappers);
+    if (!syscall_4_4_special_wrapper_addrs[0] ||
+        special_wrappers < required_wrappers) {
+        log_boot("4.4 dispatcher: required special wrappers unavailable (%d/%d, native rt_sigreturn=%llx); keep per-syscall hooks\n",
+                 special_wrappers, required_wrappers,
+                 (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
         return -ENOENT;
     }
     if (!el0_svc || !syscall_4_4_fast_return) {
