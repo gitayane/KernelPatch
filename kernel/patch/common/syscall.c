@@ -941,11 +941,9 @@ static void syscall_dispatch_4_4_probe(void)
     }
 
     syscall_4_4_fast_return = ret_fast;
-    int special_wrappers = syscall_4_4_resolve_special_wrappers();
-    log_boot("4.4 dispatcher probe: resolved special wrappers %d/%d native_rt_sigreturn=%llx compat_rt_sigreturn=%llx\n",
-             special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
-             (uint64_t)syscall_4_4_special_wrapper_addrs[0],
-             (uint64_t)syscall_4_4_special_wrapper_addrs[2]);
+    /* Keep this startup probe strictly read-only. Wrapper resolution belongs
+     * to the experimental dispatcher and is not needed to validate entry sites.
+     */
     if (syscall_4_4_find_sites(el0_svc, &fast, &trace)) {
         log_boot("4.4 dispatcher probe: handler-selection sites not found (el0_svc=%llx ret_fast=%llx)\n",
                  (uint64_t)el0_svc, (uint64_t)ret_fast);
@@ -1048,27 +1046,28 @@ void syscall_dispatch_init(void)
     if (!has_syscall_wrapper) {
         /*
          * Linux 4.4 ARM64 does not expose invoke_syscall()/el0_svc_common.
-         * The experimental entry.S dispatcher was enabled on XZP, but runtime
-         * testing on the 4.4.302-whatawurst+ kernel reached Android init and
-         * then caused init to die with SIGSEGV. Keep the proven per-syscall
-         * hooks until the fast/trace backend can be validated independently.
-         *
-         * Do not try to install the experimental dispatcher here. Returning
-         * with syscall_hook_global == 0 keeps hook_syscalln() on the legacy
-         * sys_call_table / inline-hook implementation.
-         */
-        if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
-            log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime fix\n");
-            syscall_dispatch_4_4_probe();
-        }
-        else
-            log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
+         * The experimevoid syscall_dispatch_init(void)
+{
+    if (syscall_hook_global) return;
+
+    /*
+     * Hard-disable the experimental entry-site dispatcher for all Linux 4.4
+     * kernels while the XZP 4.4.302 path is under runtime validation. Do not
+     * allow the generic dispatcher to activate even if an unexpected wrapper
+     * symbol is present; preserve the tested per-syscall path.
+     */
+    if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
+        log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\\n");
+        syscall_dispatch_4_4_probe();
         return;
     }
 
-    /* Prefer invoke_syscall: it runs after syscall_trace_enter (seccomp/ptrace)
-     * and before syscall_trace_exit, i.e. at the same granularity as the old
-     * per-syscall hooks. Hooking there lets skip_origin skip only the real
+    if (!has_syscall_wrapper) {
+        log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\\n");
+        return;
+    }
+
+n skip only the real
      * handler while el0_svc_common still performs its entry/exit work. Fall back
      * to el0_svc_common, which is coarser and cannot honour skip_origin.
      * GCC clones (LTO/constprop/isra) get a trailing '.' suffix; the helper
