@@ -8,6 +8,7 @@
 #include <cache.h>
 #include <ktypes.h>
 #include <hook.h>
+#include <hotpatch.h>
 #include <common.h>
 #include <linux/string.h>
 #include <symbol.h>
