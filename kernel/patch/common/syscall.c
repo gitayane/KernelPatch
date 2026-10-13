@@ -639,8 +639,12 @@ static bool syscall_4_4_is_b(uint32_t insn)
 static uintptr_t syscall_4_4_b_target(uintptr_t pc, uint32_t insn)
 {
     int64_t imm26 = (int64_t)(insn & 0x03ffffffu);
-    if (imm26 & (1LL << 25)) imm26 |= ~((1LL << 26) - 1);
-    return (uintptr_t)((int64_t)pc + (imm26 << 2));
+    if (imm26 & (1LL << 25)) imm26 -= (1LL << 26);
+
+    /* A negative signed left shift is undefined in C. Multiply the signed
+     * branch displacement, then use uintptr_t addition so backward branches
+     * wrap to the correct address in the kernel's high virtual address range. */
+    return pc + (uintptr_t)(imm26 * 4);
 }
 
 static bool syscall_4_4_is_str_x0_sp(uint32_t insn)
