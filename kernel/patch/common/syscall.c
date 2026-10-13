@@ -814,6 +814,22 @@ static long syscall_4_4_invoke_original(struct pt_regs *regs, long nr, int is_co
     );
 }
 
+static bool syscall_4_4_nr_is_valid(unsigned long nr, int is_compat)
+{
+    if (is_compat) {
+#ifdef __NR_compat_syscalls
+        return nr < (unsigned long)__NR_compat_syscalls;
+#else
+        return nr < 460;
+#endif
+    }
+#ifdef __NR_syscalls
+    return nr < (unsigned long)__NR_syscalls;
+#else
+    return nr < 460;
+#endif
+}
+
 static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace, uintptr_t frame)
 {
     hook_fargs8_t fargs;
@@ -834,7 +850,14 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
      * Resume on the untouched kernel stack, restore x0-x7 from pt_regs, and
      * tail-dispatch to the wrapper with the original return continuation.
      */
-    uintptr_t handler = syscalln_addr((int)nr, is_compat);
+    /*
+     * Invalid syscall numbers must not be used to index either syscall table.
+     * The generic invoker returns -ENOSYS for these; the special-wrapper lookup
+     * must do the same range check before reading a table entry.
+     */
+    uintptr_t handler = 0;
+    if (syscall_4_4_nr_is_valid(nr, is_compat))
+        handler = syscalln_addr((int)nr, is_compat);
     if (syscall_4_4_is_special_wrapper(handler)) {
         target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
         if (!target)
