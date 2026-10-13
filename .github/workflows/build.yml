@@ -135,6 +135,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
+          commit: ${{ github.sha }}
           artifacts: |
             kernel/kpimg-linux
             kernel/kpimg-android
@@ -222,6 +223,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ env.RELEASE_TAG }}
+          commit: ${{ github.sha }}
           artifacts: |
             kptools-msys2-win.7z
           allowUpdates: true
@@ -275,6 +277,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
+          commit: ${{ github.sha }}
           artifacts: |
             tools/build/kptools-mac
           allowUpdates: true
@@ -333,6 +336,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
+          commit: ${{ github.sha }}
           artifacts: |
             lkm-out/*kernelpatch.ko
           allowUpdates: true
