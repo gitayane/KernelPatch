@@ -1043,35 +1043,32 @@ static int syscall_dispatch_4_4_init(void)
 void syscall_dispatch_init(void)
 {
     if (syscall_hook_global) return;
-    if (!has_syscall_wrapper) {
-        /*
-         * Linux 4.4 ARM64 does not expose invoke_syscall()/el0_svc_common.
-         * The experimevoid syscall_dispatch_init(void)
-{
-    if (syscall_hook_global) return;
 
     /*
-     * Hard-disable the experimental entry-site dispatcher for all Linux 4.4
-     * kernels while the XZP 4.4.302 path is under runtime validation. Do not
-     * allow the generic dispatcher to activate even if an unexpected wrapper
-     * symbol is present; preserve the tested per-syscall path.
+     * Keep the experimental entry-site dispatcher disabled on Linux 4.4 while
+     * validating the XZP 4.4.302 path. The probe is read-only; syscall hooks
+     * continue to use the legacy per-syscall path.
      */
     if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
-        log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\\n");
+        log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\n");
         syscall_dispatch_4_4_probe();
         return;
     }
 
     if (!has_syscall_wrapper) {
-        log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\\n");
+        log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
         return;
     }
 
-n skip only the real
+    /*
+     * Prefer invoke_syscall: it runs after syscall_trace_enter (seccomp/ptrace)
+     * and before syscall_trace_exit, i.e. at the same granularity as the old
+     * per-syscall hooks. Hooking there lets skip_origin skip only the real
      * handler while el0_svc_common still performs its entry/exit work. Fall back
      * to el0_svc_common, which is coarser and cannot honour skip_origin.
      * GCC clones (LTO/constprop/isra) get a trailing '.' suffix; the helper
-     * requires that separator, so el0_svc_common_compat is not matched. */
+     * requires that separator, so el0_svc_common_compat is not matched.
+     */
     uintptr_t addr = 0;
     const char *name = 0;
     int granular = 0;
@@ -1088,17 +1085,14 @@ n skip only the real
             name = "el0_svc_common";
             uint32_t *insn = (uint32_t *)addr;
             if (insn[1] != 0xa9bd7bfd) {
-                log_boot("Shadow Call Stack detected , bypass union syscall hook\n");
+                log_boot("Shadow Call Stack detected, bypass union syscall hook\n");
                 return;
-            }else{
+            } else {
                 log_boot("Shadow Call Stack not detected, proceed with union syscall hook\n");
             }
         }
     }
 
-
-
-    
     if (!addr) {
         log_boot("syscall dispatcher: no invoke_syscall/el0_svc_common, keep per-syscall hooks\n");
         return;
@@ -1113,8 +1107,8 @@ n skip only the real
     syscall_hook_handler_granular = granular;
     syscall_hook_barrier();
     syscall_hook_global = 1;
-    log_boot("syscall dispatcher: hooked %s at %llx (skip_origin %s), global syscall hook enabled\n", name,
-             (uint64_t)addr, granular ? "supported" : "unsupported");
+    log_boot("syscall dispatcher: hooked %s at %llx (skip_origin %s), global syscall hook enabled\n",
+             name, (uint64_t)addr, granular ? "supported" : "unsupported");
 }
 KP_EXPORT_SYMBOL(syscall_dispatch_init);
 
