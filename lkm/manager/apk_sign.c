@@ -330,7 +330,6 @@ static int apk_matches_digest(const char *path, const u8 *expected)
 	}
 
 	if (!v2_valid) {
-		      v2_valid, v2_blocks, v3_valid, v3_blocks, v31_valid, v31_blocks);
 		goto out;
 	}
 
