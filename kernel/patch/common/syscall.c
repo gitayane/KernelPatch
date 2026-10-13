@@ -821,6 +821,46 @@ void __noreturn kp_syscall_4_4_trace_dispatch(struct pt_regs *regs, unsigned lon
     __builtin_unreachable();
 }
 
+/*
+ * Read-only validation for the Linux 4.4 entry-site heuristic. This executes
+ * only while the global dispatcher is disabled and never modifies kernel text.
+ */
+static void syscall_dispatch_4_4_probe(void)
+{
+    uintptr_t el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
+    uintptr_t ret_fast = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
+    uintptr_t fast = 0;
+    uintptr_t trace = 0;
+    uint32_t fast_patch[3];
+    uint32_t trace_patch[3];
+
+    if (!el0_svc || !ret_fast) {
+        log_boot("4.4 dispatcher probe: missing entry symbol (el0_svc=%llx ret_fast=%llx)\n",
+                 (uint64_t)el0_svc, (uint64_t)ret_fast);
+        return;
+    }
+
+    syscall_4_4_fast_return = ret_fast;
+    if (syscall_4_4_find_sites(el0_svc, &fast, &trace)) {
+        log_boot("4.4 dispatcher probe: handler-selection sites not found (el0_svc=%llx ret_fast=%llx)\n",
+                 (uint64_t)el0_svc, (uint64_t)ret_fast);
+        return;
+    }
+
+    if (!syscall_4_4_make_branch(fast, (uintptr_t)&kp_syscall_4_4_fast_entry, fast_patch) ||
+        !syscall_4_4_make_branch(trace, (uintptr_t)&kp_syscall_4_4_trace_entry, trace_patch)) {
+        log_boot("4.4 dispatcher probe: KP veneer outside ADRP range (fast=%llx trace=%llx)\n",
+                 (uint64_t)fast, (uint64_t)trace);
+        return;
+    }
+
+    log_boot("4.4 dispatcher probe: el0_svc=%llx ret_fast=%llx fast=%llx trace=%llx\n",
+             (uint64_t)el0_svc, (uint64_t)ret_fast, (uint64_t)fast, (uint64_t)trace);
+    log_boot("4.4 dispatcher probe insns: fast=%08x/%08x/%08x trace=%08x/%08x/%08x\n",
+             ((uint32_t *)fast)[0], ((uint32_t *)fast)[1], ((uint32_t *)fast)[2],
+             ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
+}
+
 static int syscall_dispatch_4_4_init(void)
 {
     uintptr_t el0_svc;
@@ -902,8 +942,10 @@ void syscall_dispatch_init(void)
          * with syscall_hook_global == 0 keeps hook_syscalln() on the legacy
          * sys_call_table / inline-hook implementation.
          */
-        if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0))
+        if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
             log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime fix\n");
+            syscall_dispatch_4_4_probe();
+        }
         else
             log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
         return;
