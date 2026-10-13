@@ -68,10 +68,11 @@ kp_syscall_4_4_resume:
  * Tail-dispatch syscall-table wrappers that require the original pt_regs stack
  * (e.g. rt_sigreturn and AArch32 ABI-repacking wrappers).
  *
- * x0=frame below pt_regs, x1=original wrapper address, x2=normal continuation.
- * Restore the state that the original LDR/BLR sequence would have presented,
- * especially SP=pt_regs and x0-x7. The wrapper returns directly to the supplied
- * continuation, so the C dispatcher is deliberately bypassed for these entries.
+ * x0=frame below pt_regs, x1=original wrapper, x2=normal continuation,
+ * x3=non-zero for the __sys_trace path. Restore x0-x7 and the original stack.
+ * In the trace path, return through a tiny trampoline that performs the STR
+ * that the overwritten entry instruction would have performed before continuing
+ * at the original __sys_trace return path.
  */
     .global kp_syscall_4_4_resume_special
     .type kp_syscall_4_4_resume_special, %function
@@ -79,18 +80,39 @@ kp_syscall_4_4_resume_special:
     mov x9, x0
     mov x10, x1
     mov x11, x2
+    mov x12, x3
     ldp x19, x20, [x9, #0]
     ldp x21, x22, [x9, #16]
     ldp x23, x24, [x9, #32]
     ldp x25, x26, [x9, #48]
     ldp x27, x28, [x9, #64]
     ldp x29, x30, [x9, #80]
-    add x12, x9, #96
-    ldp x0, x1, [x12, #0]
-    ldp x2, x3, [x12, #16]
-    ldp x4, x5, [x12, #32]
-    ldp x6, x7, [x12, #48]
+    add x13, x9, #96
+    ldp x0, x1, [x13, #0]
+    ldp x2, x3, [x13, #16]
+    ldp x4, x5, [x13, #32]
+    ldp x6, x7, [x13, #48]
     add sp, x9, #96
+    cbz x12, 1f
+    /* Callee-saved registers carry frame/continuation through the wrapper. */
+    mov x19, x9
+    mov x20, x11
+    adr x30, kp_syscall_4_4_special_trace_return
+    br x10
+1:
     mov x30, x11
+    br x10
+kp_syscall_4_4_special_trace_return:
+    /* Mirror the original STR X0,[sp,#S_X0] at the patched trace site. */
+    str x0, [sp, #0]
+    mov x9, x19
+    mov x10, x20
+    ldp x19, x20, [x9, #0]
+    ldp x21, x22, [x9, #16]
+    ldp x23, x24, [x9, #32]
+    ldp x25, x26, [x9, #48]
+    ldp x27, x28, [x9, #64]
+    ldp x29, x30, [x9, #80]
+    add sp, x9, #96
     br x10
     .size kp_syscall_4_4_resume_special, .-kp_syscall_4_4_resume_special
