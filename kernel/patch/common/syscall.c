@@ -623,7 +623,7 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 extern void kp_syscall_4_4_fast_entry(void);
 extern void kp_syscall_4_4_trace_entry(void);
 extern void __noreturn kp_syscall_4_4_resume(uintptr_t frame, long ret, uintptr_t target);
-extern void __noreturn kp_syscall_4_4_resume_special(uintptr_t frame, uintptr_t handler, uintptr_t target);
+extern void __noreturn kp_syscall_4_4_resume_special(uintptr_t frame, uintptr_t handler, uintptr_t target, int trace);
 
 static uintptr_t syscall_4_4_fast_site;
 static uintptr_t syscall_4_4_trace_site;
@@ -839,7 +839,7 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
         target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
         if (!target)
             target = trace ? syscall_4_4_trace_site + 12 : syscall_4_4_fast_return;
-        kp_syscall_4_4_resume_special(frame, handler, target);
+        kp_syscall_4_4_resume_special(frame, handler, target, trace ? 1 : 0);
         __builtin_unreachable();
     }
 
