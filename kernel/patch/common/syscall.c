@@ -623,6 +623,7 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 extern void kp_syscall_4_4_fast_entry(void);
 extern void kp_syscall_4_4_trace_entry(void);
 extern void __noreturn kp_syscall_4_4_resume(uintptr_t frame, long ret, uintptr_t target);
+extern void __noreturn kp_syscall_4_4_resume_special(uintptr_t frame, uintptr_t handler, uintptr_t target);
 
 static uintptr_t syscall_4_4_fast_site;
 static uintptr_t syscall_4_4_trace_site;
@@ -630,6 +631,68 @@ static uintptr_t syscall_4_4_fast_return;
 static uintptr_t syscall_4_4_trace_return;
 static uint32_t syscall_4_4_fast_backup[3];
 static uint32_t syscall_4_4_trace_backup[3];
+
+/*
+ * Linux 4.4 ARM64/compat has syscall-table entries that are assembly wrappers,
+ * not ordinary C handlers. They depend on SP pointing at the original pt_regs
+ * frame and, for some compat calls, translate split 32-bit arguments. Calling
+ * those entries from the C dispatcher corrupts their ABI (notably sigreturn).
+ *
+ * These handlers must be tail-dispatched from the original pt_regs stack and
+ * therefore bypass generic before/after callbacks. No current KP hook relies
+ * on observing these special syscalls.
+ */
+static const char *const syscall_4_4_special_wrapper_names[] = {
+    "sys_rt_sigreturn_wrapper",
+    "compat_sys_sigreturn_wrapper",
+    "compat_sys_rt_sigreturn_wrapper",
+    "compat_sys_statfs64_wrapper",
+    "compat_sys_fstatfs64_wrapper",
+    "compat_sys_pread64_wrapper",
+    "compat_sys_pwrite64_wrapper",
+    "compat_sys_truncate64_wrapper",
+    "compat_sys_ftruncate64_wrapper",
+    "compat_sys_readahead_wrapper",
+    "compat_sys_fadvise64_64_wrapper",
+    "compat_sys_sync_file_range2_wrapper",
+    "compat_sys_fallocate_wrapper",
+    "compat_sys_mmap2_wrapper",
+};
+#define SYSCALL_4_4_SPECIAL_WRAPPER_NUM \
+    (sizeof(syscall_4_4_special_wrapper_names) / sizeof(syscall_4_4_special_wrapper_names[0]))
+
+static uintptr_t syscall_4_4_special_wrapper_addrs[SYSCALL_4_4_SPECIAL_WRAPPER_NUM];
+
+static int syscall_4_4_resolve_special_wrappers(void)
+{
+    int found = 0;
+
+    for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_NUM; i++) {
+        syscall_4_4_special_wrapper_addrs[i] =
+            kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
+        if (syscall_4_4_special_wrapper_addrs[i]) {
+            found++;
+        } else {
+            log_boot("4.4 dispatcher: unresolved special wrapper %s\n",
+                     syscall_4_4_special_wrapper_names[i]);
+        }
+    }
+
+    return found;
+}
+
+static bool syscall_4_4_is_special_wrapper(uintptr_t addr)
+{
+    if (!addr) return false;
+
+    for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_NUM; i++) {
+        if (syscall_4_4_special_wrapper_addrs[i] == addr)
+            return true;
+    }
+
+    return false;
+}
+
 
 static bool syscall_4_4_is_b(uint32_t insn)
 {
@@ -766,6 +829,20 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
     is_compat = compat_user_mode(regs) ? 1 : 0;
     regs->syscallno = (long)nr;
 
+    /*
+     * Do not call pt_regs/argument-repacking wrappers as ordinary C functions.
+     * Resume on the untouched kernel stack, restore x0-x7 from pt_regs, and
+     * tail-dispatch to the wrapper with the original return continuation.
+     */
+    uintptr_t handler = syscalln_addr((int)nr, is_compat);
+    if (syscall_4_4_is_special_wrapper(handler)) {
+        target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
+        if (!target)
+            target = trace ? syscall_4_4_trace_site + 12 : syscall_4_4_fast_return;
+        kp_syscall_4_4_resume_special(frame, handler, target);
+        __builtin_unreachable();
+    }
+
     fargs.chain = 0;
     fargs.skip_origin = 0;
     fargs.ret = 0;
@@ -841,6 +918,11 @@ static void syscall_dispatch_4_4_probe(void)
     }
 
     syscall_4_4_fast_return = ret_fast;
+    int special_wrappers = syscall_4_4_resolve_special_wrappers();
+    log_boot("4.4 dispatcher probe: resolved special wrappers %d/%d native_rt_sigreturn=%llx compat_rt_sigreturn=%llx\n",
+             special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0],
+             (uint64_t)syscall_4_4_special_wrapper_addrs[2]);
     if (syscall_4_4_find_sites(el0_svc, &fast, &trace)) {
         log_boot("4.4 dispatcher probe: handler-selection sites not found (el0_svc=%llx ret_fast=%llx)\n",
                  (uint64_t)el0_svc, (uint64_t)ret_fast);
@@ -871,6 +953,14 @@ static int syscall_dispatch_4_4_init(void)
 
     el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
+    int special_wrappers = syscall_4_4_resolve_special_wrappers();
+    int required_wrappers = compat_sys_call_table
+        ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
+    if (special_wrappers < required_wrappers) {
+        log_boot("4.4 dispatcher: only %d/%d required special wrappers resolved; keep per-syscall hooks\n",
+                 special_wrappers, required_wrappers);
+        return -ENOENT;
+    }
     if (!el0_svc || !syscall_4_4_fast_return) {
         log_boot("4.4 dispatcher: missing el0_svc/ret_fast_syscall\\n");
         return -ENOENT;
