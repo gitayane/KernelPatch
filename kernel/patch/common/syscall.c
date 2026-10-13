@@ -887,14 +887,20 @@ void syscall_dispatch_init(void)
     if (syscall_hook_global) return;
     if (!has_syscall_wrapper) {
         /*
-         * Linux 4.4 ARM64 has no invoke_syscall()/el0_svc_common(). Use the
-         * dedicated entry.S backend, but only for the 4.4 ABI/layout. On all
-         * other kernels preserve the existing per-syscall fallback.
+         * Linux 4.4 ARM64 does not expose invoke_syscall()/el0_svc_common.
+         * The experimental entry.S dispatcher was enabled on XZP, but runtime
+         * testing on the 4.4.302-whatawurst+ kernel reached Android init and
+         * then caused init to die with SIGSEGV. Keep the proven per-syscall
+         * hooks until the fast/trace backend can be validated independently.
+         *
+         * Do not try to install the experimental dispatcher here. Returning
+         * with syscall_hook_global == 0 keeps hook_syscalln() on the legacy
+         * sys_call_table / inline-hook implementation.
          */
-        if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
-            if (syscall_dispatch_4_4_init() == 0) return;
-        }
-        log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
+        if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0))
+            log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime fix\n");
+        else
+            log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
         return;
     }
 
