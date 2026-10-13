@@ -1858,7 +1858,7 @@ static void refresh_packages_list_tmp_rename(struct dentry *tmp_dentry)
 
     buf = kp_dentry_path_raw(tmp_dentry, path, sizeof(path));
     if (IS_ERR_OR_NULL(buf)) {
-        log_boot("packages.list rename: dentry_path_raw failed\\n");
+        log_boot("packages.list rename: dentry_path_raw failed\n");
         return;
     }
 
