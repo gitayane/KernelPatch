@@ -27,6 +27,17 @@
 const struct kp_trusted_manager kp_trusted_managers[] = {
 	{
 		.package = "me.bmax.apatch",
+		/* Original upstream APatch signing certificate; keep trusted
+		 * alongside the XZP custom Manager certificate below. */
+		.digest = {
+			0xd7, 0x1d, 0xad, 0xc0, 0xca, 0x07, 0xbd, 0xf5,
+			0x94, 0x38, 0x3b, 0xfb, 0x2a, 0x44, 0x51, 0x34,
+			0xa0, 0x73, 0x39, 0xf1, 0x2a, 0x27, 0x04, 0x4a,
+			0x1b, 0x32, 0x69, 0x81, 0xac, 0xf5, 0xf3, 0x19,
+		},
+	},
+	{
+		.package = "me.bmax.apatch",
 		/* SHA-256 of the DER signing certificate used by gitayane/APatch
 		 * preview-11296-80 (v2-only signed release APK). */
 		.digest = {
