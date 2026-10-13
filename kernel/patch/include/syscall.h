@@ -13,6 +13,7 @@
 #include <uapi/asm-generic/unistd.h>
 
 extern int has_syscall_wrapper;
+int syscall_hook_global_enabled(void);
 extern struct
 {
     const char *name;
@@ -178,7 +179,6 @@ void syscall_dispatch_init(void);
 /**
  * @brief Non-zero once the global syscall dispatcher is active.
  */
-int syscall_hook_global_enabled(void);
 
 /**
  * @brief Register the uid gate the dispatcher evaluates once per syscall before
