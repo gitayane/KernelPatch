@@ -1842,23 +1842,21 @@ static kp_dentry_path_raw_t kp_dentry_path_raw;
 
 static void refresh_packages_list_tmp_rename(struct dentry *tmp_dentry)
 {
-    char path[128];
+    char path[256];
     char *buf;
 
     if (!tmp_dentry || !kp_dentry_path_raw) {
         return;
     }
 
-    /* Most rename hooks are unrelated. Filter by basename before resolving
-     * the full path, avoiding unnecessary dentry_path_raw calls and log noise. */
-    if (tmp_dentry->d_name.len != sizeof("packages.list.tmp") - 1 ||
-        memcmp(tmp_dentry->d_name.name, "packages.list.tmp", sizeof("packages.list.tmp") - 1)) {
-        return;
-    }
-
+    /*
+     * The stripped KPIMG headers intentionally keep struct dentry opaque.
+     * Resolve the path through the exported helper; deep unrelated paths may
+     * exceed the buffer, which is expected for this broad rename observer.
+     * Ignore those misses quietly and only act on the exact target path below.
+     */
     buf = kp_dentry_path_raw(tmp_dentry, path, sizeof(path));
     if (IS_ERR_OR_NULL(buf)) {
-        log_boot("packages.list rename: dentry_path_raw failed\n");
         return;
     }
 
