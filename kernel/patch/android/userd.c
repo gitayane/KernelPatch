@@ -530,7 +530,6 @@ static int apk_matches_trusted_signature(const char *path, const uint8_t *expect
     }
 
     if (!v2_valid) {
-                 v2_valid, v2_blocks, v3_valid, v3_blocks, v31_valid, v31_blocks);
         goto out;
     }
 
