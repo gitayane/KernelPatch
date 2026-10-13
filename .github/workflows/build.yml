@@ -8,6 +8,12 @@ on:
       - 'work/**'
   workflow_call:
   workflow_dispatch:
+    inputs:
+      publish_preview:
+        description: "Publish a development preview for device testing"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   Build-on-Ubuntu:
@@ -124,7 +130,7 @@ jobs:
           mv kptools kptools-linux
       
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/work/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview)
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -211,7 +217,7 @@ jobs:
           dir .
 
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/work/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview)
         uses: ncipollo/release-action@v1.12.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -264,7 +270,7 @@ jobs:
           make
           mv kptools kptools-mac
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/work/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview)
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -322,7 +328,7 @@ jobs:
           path: lkm-out
           merge-multiple: true
       - name: Release LKM
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || startsWith(github.ref, 'refs/heads/work/')
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview)
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
