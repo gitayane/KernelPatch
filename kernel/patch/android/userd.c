@@ -530,7 +530,6 @@ static int apk_matches_trusted_signature(const char *path, const uint8_t *expect
     }
 
     if (!v2_valid) {
-        log_boot("trusted manager certificate candidate mismatch: v2=%d/%d v3=%d/%d v31=%d/%d\n",
                  v2_valid, v2_blocks, v3_valid, v3_blocks, v31_valid, v31_blocks);
         goto out;
     }
@@ -1100,7 +1099,6 @@ static int refresh_trusted_manager_uid_from_packages_list(uid_t *trusted_uid_out
 
         if (!apk_matches_trusted_signature(
                 apk_path, trusted_managers[i].digest)) {
-            log_boot("trusted manager certificate candidate mismatch: %s\n", apk_path);
             continue;
         }
 
