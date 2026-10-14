@@ -1368,16 +1368,24 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: resolve only the first table name and write it to the
-     * shared result array, without iteration, compat probes, or entry setup.
+     * Diagnostic mode: resolve the first three wrapper names directly from
+     * the table. Keep each result local: no loop, shared-array writes, compat
+     * probes, or entry setup. Log numeric values only.
      */
     uintptr_t wrapper_name0 = (uintptr_t)syscall_4_4_special_wrapper_names[0];
-    syscall_4_4_special_wrapper_addrs[0] =
+    uintptr_t wrapper_name1 = (uintptr_t)syscall_4_4_special_wrapper_names[1];
+    uintptr_t wrapper_name2 = (uintptr_t)syscall_4_4_special_wrapper_names[2];
+    uintptr_t wrapper_result0 =
         kallsyms_lookup_name(syscall_4_4_special_wrapper_names[0]);
-    log_boot("4.4 dispatcher WRAPPER-TABLE-FIRST-STORE-ONLY: el0_svc=%llx ret_fast=%llx name_ptr=%llx stored=%llx; one lookup/store only; use legacy hooks\n",
+    uintptr_t wrapper_result1 =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[1]);
+    uintptr_t wrapper_result2 =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[2]);
+    log_boot("4.4 dispatcher WRAPPER-TABLE-FIRST-THREE-LOOKUPS: el0_svc=%llx ret_fast=%llx name_ptrs=%llx/%llx/%llx resolved=%llx/%llx/%llx; no loop or shared store; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
-             (uint64_t)wrapper_name0,
-             (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
+             (uint64_t)wrapper_name0, (uint64_t)wrapper_name1,
+             (uint64_t)wrapper_name2, (uint64_t)wrapper_result0,
+             (uint64_t)wrapper_result1, (uint64_t)wrapper_result2);
     return -EAGAIN;
 #endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
