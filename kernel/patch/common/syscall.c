@@ -434,6 +434,22 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "PREPARE_ONLY is mutually exclusive with FAST_ONLY, FAST_BYPASS, and PATCH_RESTORE"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "SYMBOLS_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY)
+#error "SYMBOLS_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
 #if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
 typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
 typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
@@ -1277,6 +1293,17 @@ static int syscall_dispatch_4_4_init(void)
 
     el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
+#if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY
+    /*
+     * Isolate only the two entry-symbol lookups. Deliberately return a failure
+     * so syscall_dispatch_init() takes its existing read-only probe/fallback
+     * path; no wrapper enumeration, site scan, branch encoding, or text patch
+     * is performed by the experimental initializer in this mode.
+     */
+    log_boot("4.4 dispatcher SYMBOLS-ONLY: el0_svc=%llx ret_fast=%llx; skip wrapper/site setup and use legacy hooks\\n",
+             (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return);
+    return -EAGAIN;
+#endif
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
     int required_wrappers = syscall_4_4_compat_layer_present()
         ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
