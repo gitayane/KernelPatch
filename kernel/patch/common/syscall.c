@@ -498,6 +498,22 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "WRAPPER_LIST_ONLY is mutually exclusive with other dispatcher diagnostic modes"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "WRAPPER_PREFIX_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY)
+#error "WRAPPER_PREFIX_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
 #if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
 typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
 typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
@@ -926,6 +942,11 @@ static const char *const syscall_4_4_special_wrapper_names[] = {
 };
 #define SYSCALL_4_4_SPECIAL_WRAPPER_NUM \
     (sizeof(syscall_4_4_special_wrapper_names) / sizeof(syscall_4_4_special_wrapper_names[0]))
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+#define SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT 7
+#else
+#define SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT SYSCALL_4_4_SPECIAL_WRAPPER_NUM
+#endif
 
 static uintptr_t syscall_4_4_special_wrapper_addrs[SYSCALL_4_4_SPECIAL_WRAPPER_NUM];
 static bool syscall_4_4_special_wrappers_ready;
@@ -944,7 +965,7 @@ static int syscall_4_4_resolve_special_wrappers(void)
 {
     int found = 0;
 
-    for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_NUM; i++) {
+    for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT; i++) {
         syscall_4_4_special_wrapper_addrs[i] =
             kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
         if (syscall_4_4_special_wrapper_addrs[i]) {
@@ -954,6 +975,16 @@ static int syscall_4_4_resolve_special_wrappers(void)
                      syscall_4_4_special_wrapper_names[i]);
         }
     }
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+    /*
+     * Diagnostic mode: resolve only the first seven wrapper names, then
+     * return through the legacy-hook fallback without compat probes, site
+     * discovery, or any kernel-text modification.
+     */
+    syscall_4_4_special_wrappers_ready = false;
+    return found;
+#endif
 
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
     /*
@@ -1376,6 +1407,12 @@ static int syscall_dispatch_4_4_init(void)
     return -EAGAIN;
 #endif
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+    log_boot("4.4 dispatcher WRAPPER-PREFIX-ONLY: resolved=%d/7 names 1-7 of %d; native_rt_sigreturn=%llx; skipped remaining wrappers, compat probes and site setup; use legacy hooks\n",
+             special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
+    return -EAGAIN;
+#endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
     log_boot("4.4 dispatcher WRAPPER-LIST-ONLY: resolved=%d/%d native_rt_sigreturn=%llx; skipped compat probes and site setup; use legacy hooks\n",
              special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
