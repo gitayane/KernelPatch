@@ -372,6 +372,18 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER must be 0 or 1"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "FAST_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
 /*
  * Global syscall dispatcher.
  *
@@ -1188,6 +1200,22 @@ static int syscall_dispatch_4_4_init(void)
         log_boot("4.4 dispatcher: fast site patch rc=%d rollback rc=%d\n", rc, rollback_rc);
         return rollback_rc ? rollback_rc : rc;
     }
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
+    /*
+     * Diagnostic mode: patch only the normal fast syscall entry. Leave the
+     * trace/audit entry entirely untouched to distinguish a fast-entry failure
+     * from a trace-entry or two-site interaction failure. This mode is for
+     * boot-path isolation only; traced syscalls intentionally retain legacy
+     * per-syscall behavior and this is not a full-featured runtime mode.
+     */
+    syscall_hook_handler_granular = 1;
+    syscall_hook_barrier();
+    syscall_hook_global = 1;
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx; FAST-ONLY diagnostic mode enabled, trace site unchanged\n",
+             fast, trace, syscall_4_4_fast_return);
+    return 0;
+#endif
 
     rc = hotpatch(trace_addrs, trace_patch, 3);
     if (rc) {
