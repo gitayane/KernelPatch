@@ -1368,15 +1368,17 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: perform exactly one wrapper lookup (the third name
-     * in the former special-wrapper list), avoid the batch resolver and its
-     * unresolved-name logging, then use the existing legacy-hook fallback.
+     * Diagnostic mode: read the first three raw pointers from the static
+     * wrapper-name table but do not dereference them or call kallsyms. This
+     * distinguishes a bad relocated pointer table from lookup/logging issues.
      */
-    uintptr_t compat_rt_sigreturn_wrapper =
-        kallsyms_lookup_name("compat_sys_rt_sigreturn_wrapper");
-    log_boot("4.4 dispatcher WRAPPER-THIRD-ONLY: el0_svc=%llx ret_fast=%llx compat_sys_rt_sigreturn_wrapper=%llx; skip wrapper list and use legacy hooks\n",
+    uintptr_t wrapper_name0 = (uintptr_t)syscall_4_4_special_wrapper_names[0];
+    uintptr_t wrapper_name1 = (uintptr_t)syscall_4_4_special_wrapper_names[1];
+    uintptr_t wrapper_name2 = (uintptr_t)syscall_4_4_special_wrapper_names[2];
+    log_boot("4.4 dispatcher WRAPPER-TABLE-POINTERS-ONLY: el0_svc=%llx ret_fast=%llx name_ptrs=%llx/%llx/%llx; no dereference or lookup; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
-             (uint64_t)compat_rt_sigreturn_wrapper);
+             (uint64_t)wrapper_name0, (uint64_t)wrapper_name1,
+             (uint64_t)wrapper_name2);
     return -EAGAIN;
 #endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
