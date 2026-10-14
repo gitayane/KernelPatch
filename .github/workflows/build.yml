@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       enable_xzp_44_fast_bypass_test:
-        description: "DIAGNOSTIC ONLY: patch fast entry but bypass C dispatcher entirely; leaves trace/audit entry unchanged and disables syscall callbacks"
+        description: "DIAGNOSTIC ONLY: patch fast entry without C dispatcher; leaves trace/audit and global-hook state unchanged, preserving legacy per-syscall hooks"
         required: true
         type: boolean
         default: false
