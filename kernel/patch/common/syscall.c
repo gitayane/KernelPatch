@@ -466,6 +466,22 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "WRAPPERS_ONLY is mutually exclusive with other dispatcher diagnostic modes"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "WRAPPER_FIRST_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY)
+#error "WRAPPER_FIRST_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
 #if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
 typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
 typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
@@ -1309,6 +1325,19 @@ static int syscall_dispatch_4_4_init(void)
 
     el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
+    /*
+     * Ask the exact-name symbol resolver about only the required native
+     * rt_sigreturn wrapper. Do not enumerate the remaining wrappers, probe for
+     * compat support, or assign dispatcher entry-site state.
+     */
+    uintptr_t native_rt_sigreturn =
+        kallsyms_lookup_name("sys_rt_sigreturn_wrapper");
+    log_boot("4.4 dispatcher WRAPPER-FIRST-ONLY: el0_svc=%llx ret_fast=%llx native_rt_sigreturn=%llx; skip remaining wrapper/site setup and use legacy hooks\n",
+             (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
+             (uint64_t)native_rt_sigreturn);
+    return -EAGAIN;
+#endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY
     /*
      * Isolate only the two entry-symbol lookups. Deliberately return a failure

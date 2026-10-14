@@ -49,6 +49,11 @@ on:
         required: true
         type: boolean
         default: false
+      enable_xzp_44_wrapper_first_only_test:
+        description: "SAFE DIAGNOSTIC: resolve only sys_rt_sigreturn_wrapper by exact name, then use the legacy path"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   Build-on-Ubuntu:
@@ -96,6 +101,7 @@ jobs:
           EXPERIMENTAL_44_PREPARE_ONLY=0
           EXPERIMENTAL_44_SYMBOLS_ONLY=0
           EXPERIMENTAL_44_WRAPPERS_ONLY=0
+          EXPERIMENTAL_44_WRAPPER_FIRST_ONLY=0
           if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_dispatcher }}" == "true" ]]; then
             EXPERIMENTAL_44_DISPATCHER=1
           fi
@@ -161,6 +167,17 @@ jobs:
             fi
             EXPERIMENTAL_44_WRAPPERS_ONLY=1
           fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_wrapper_first_only_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Wrapper-first-only diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" ]]; then
+              echo "::error::Wrapper-first-only mode is mutually exclusive with other diagnostic modes"
+              exit 1
+            fi
+            EXPERIMENTAL_44_WRAPPER_FIRST_ONLY=1
+          fi
           if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[fast-only]') }}" == "true" ]]; then
             EXPERIMENTAL_44_DISPATCHER=1
             EXPERIMENTAL_44_FAST_ONLY=1
@@ -197,8 +214,16 @@ jobs:
             EXPERIMENTAL_44_DISPATCHER=1
             EXPERIMENTAL_44_WRAPPERS_ONLY=1
           fi
-          if [[ "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" ) ]]; then
+          if [[ "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" ) ]]; then
             echo "::error::Wrappers-only mode is mutually exclusive with other diagnostic modes"
+            exit 1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[wrapper-first]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_WRAPPER_FIRST_ONLY=1
+          fi
+          if [[ "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" ) ]]; then
+            echo "::error::Wrapper-first-only mode is mutually exclusive with other diagnostic modes"
             exit 1
           fi
           echo "Linux 4.4 experimental dispatcher build flag: ${EXPERIMENTAL_44_DISPATCHER}"
@@ -208,9 +233,10 @@ jobs:
           echo "Linux 4.4 prepare-only diagnostic build flag: ${EXPERIMENTAL_44_PREPARE_ONLY}"
           echo "Linux 4.4 symbols-only diagnostic build flag: ${EXPERIMENTAL_44_SYMBOLS_ONLY}"
           echo "Linux 4.4 wrappers-only diagnostic build flag: ${EXPERIMENTAL_44_WRAPPERS_ONLY}"
+          echo "Linux 4.4 wrapper-first-only diagnostic build flag: ${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}"
 
           export ANDROID=1
-          make hdr kpimg KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=${EXPERIMENTAL_44_DISPATCHER} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=${EXPERIMENTAL_44_FAST_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=${EXPERIMENTAL_44_FAST_BYPASS} KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE=${EXPERIMENTAL_44_PATCH_RESTORE} KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY=${EXPERIMENTAL_44_PREPARE_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY=${EXPERIMENTAL_44_SYMBOLS_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY=${EXPERIMENTAL_44_WRAPPERS_ONLY}
+          make hdr kpimg KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=${EXPERIMENTAL_44_DISPATCHER} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=${EXPERIMENTAL_44_FAST_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=${EXPERIMENTAL_44_FAST_BYPASS} KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE=${EXPERIMENTAL_44_PATCH_RESTORE} KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY=${EXPERIMENTAL_44_PREPARE_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY=${EXPERIMENTAL_44_SYMBOLS_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY=${EXPERIMENTAL_44_WRAPPERS_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY=${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}
           mv kpimg kpimg-android
           mv kpimg.elf kpimg.elf-android
           make clean
@@ -218,7 +244,7 @@ jobs:
           unset ANDROID
           # The opt-in is deliberately limited to the Android image used on XZP.
           # Keep the generic Linux image on the default legacy syscall path.
-          make KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=0 KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE=0 KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY=0
+          make KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=0 KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE=0 KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY=0
           mv kpimg kpimg-linux
           mv kpimg.elf kpimg.elf-linux
 
