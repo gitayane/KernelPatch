@@ -450,6 +450,22 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "SYMBOLS_ONLY is mutually exclusive with other dispatcher diagnostic modes"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "WRAPPERS_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY)
+#error "WRAPPERS_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
 #if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
 typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
 typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
@@ -1300,13 +1316,25 @@ static int syscall_dispatch_4_4_init(void)
      * path; no wrapper enumeration, site scan, branch encoding, or text patch
      * is performed by the experimental initializer in this mode.
      */
-    log_boot("4.4 dispatcher SYMBOLS-ONLY: el0_svc=%llx ret_fast=%llx; skip wrapper/site setup and use legacy hooks\\n",
+    log_boot("4.4 dispatcher SYMBOLS-ONLY: el0_svc=%llx ret_fast=%llx; skip wrapper/site setup and use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return);
     return -EAGAIN;
 #endif
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
     int required_wrappers = syscall_4_4_compat_layer_present()
         ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY
+    /*
+     * Run the special-wrapper name resolution and compat-layer detection,
+     * but deliberately return through the existing legacy-hook fallback.
+     * This isolates that phase from syscall-site discovery, global site-state
+     * assignment, branch preparation, and every kernel-text write.
+     */
+    log_boot("4.4 dispatcher WRAPPERS-ONLY: resolved=%d required=%d native_rt_sigreturn=%llx; skip site setup and use legacy hooks\n",
+             special_wrappers, required_wrappers,
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
+    return -EAGAIN;
+#endif
     if (!syscall_4_4_special_wrapper_addrs[0] ||
         special_wrappers < required_wrappers) {
         log_boot("4.4 dispatcher: required special wrappers unavailable (%d/%d, native rt_sigreturn=%llx); keep per-syscall hooks\n",
