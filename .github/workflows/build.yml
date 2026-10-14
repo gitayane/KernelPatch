@@ -72,7 +72,9 @@ jobs:
           make clean
 
           unset ANDROID
-          make KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=${EXPERIMENTAL_44_DISPATCHER}
+          # The opt-in is deliberately limited to the Android image used on XZP.
+          # Keep the generic Linux image on the default legacy syscall path.
+          make KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=0
           mv kpimg kpimg-linux
           mv kpimg.elf kpimg.elf-linux
 
