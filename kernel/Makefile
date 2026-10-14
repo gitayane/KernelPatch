@@ -25,6 +25,9 @@ X86_OBJCOPY ?= objcopy
 
 CFLAGS += -Wall -fno-builtin -std=gnu11 -nostdinc -mgeneral-regs-only -ffixed-x18
 CFLAGS += -g
+# Experimental XZP Linux 4.4 global syscall dispatcher; safe default is off.
+KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER ?= 0
+CFLAGS += -DKP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=$(KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER)
 
 # kpimg-x86 links at 0 and runs from wherever it was injected, and the linker
 # script keeps no relocations, so every reference has to be RIP-relative.
