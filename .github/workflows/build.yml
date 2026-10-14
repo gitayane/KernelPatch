@@ -143,7 +143,7 @@ jobs:
           mv kptools kptools-linux
       
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview)
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -231,7 +231,7 @@ jobs:
           dir .
 
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview)
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.12.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -285,7 +285,7 @@ jobs:
           make
           mv kptools kptools-mac
       - name: Release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview)
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -344,7 +344,7 @@ jobs:
           path: lkm-out
           merge-multiple: true
       - name: Release LKM
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview)
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
