@@ -942,12 +942,6 @@ static const char *const syscall_4_4_special_wrapper_names[] = {
 };
 #define SYSCALL_4_4_SPECIAL_WRAPPER_NUM \
     (sizeof(syscall_4_4_special_wrapper_names) / sizeof(syscall_4_4_special_wrapper_names[0]))
-#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
-#define SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT 3
-#else
-#define SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT SYSCALL_4_4_SPECIAL_WRAPPER_NUM
-#endif
-
 static uintptr_t syscall_4_4_special_wrapper_addrs[SYSCALL_4_4_SPECIAL_WRAPPER_NUM];
 static bool syscall_4_4_special_wrappers_ready;
 
@@ -965,7 +959,7 @@ static int syscall_4_4_resolve_special_wrappers(void)
 {
     int found = 0;
 
-    for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT; i++) {
+    for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_NUM; i++) {
         syscall_4_4_special_wrapper_addrs[i] =
             kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
         if (syscall_4_4_special_wrapper_addrs[i]) {
@@ -975,16 +969,6 @@ static int syscall_4_4_resolve_special_wrappers(void)
                      syscall_4_4_special_wrapper_names[i]);
         }
     }
-
-#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
-    /*
-     * Diagnostic mode: resolve only the first three wrapper names, then
-     * return through the legacy-hook fallback without compat probes, site
-     * discovery, or any kernel-text modification.
-     */
-    syscall_4_4_special_wrappers_ready = false;
-    return found;
-#endif
 
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
     /*
@@ -1382,6 +1366,19 @@ static int syscall_dispatch_4_4_init(void)
 
     el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+    /*
+     * Diagnostic mode: perform exactly one wrapper lookup (the second name
+     * in the former special-wrapper list), avoid the batch resolver and its
+     * unresolved-name logging, then use the existing legacy-hook fallback.
+     */
+    uintptr_t compat_sigreturn_wrapper =
+        kallsyms_lookup_name("compat_sys_sigreturn_wrapper");
+    log_boot("4.4 dispatcher WRAPPER-SECOND-ONLY: el0_svc=%llx ret_fast=%llx compat_sys_sigreturn_wrapper=%llx; skip wrapper list and use legacy hooks\n",
+             (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
+             (uint64_t)compat_sigreturn_wrapper);
+    return -EAGAIN;
+#endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
     /*
      * Ask the exact-name symbol resolver about only the required native
@@ -1407,12 +1404,6 @@ static int syscall_dispatch_4_4_init(void)
     return -EAGAIN;
 #endif
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
-#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
-    log_boot("4.4 dispatcher WRAPPER-PREFIX-ONLY: resolved=%d/3 names 1-3 of %d; native_rt_sigreturn=%llx; skipped remaining wrappers, compat probes and site setup; use legacy hooks\n",
-             special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
-             (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
-    return -EAGAIN;
-#endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
     log_boot("4.4 dispatcher WRAPPER-LIST-ONLY: resolved=%d/%d native_rt_sigreturn=%llx; skipped compat probes and site setup; use legacy hooks\n",
              special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
