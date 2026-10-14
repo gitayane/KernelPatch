@@ -675,6 +675,15 @@ static const char *const syscall_4_4_special_wrapper_names[] = {
 static uintptr_t syscall_4_4_special_wrapper_addrs[SYSCALL_4_4_SPECIAL_WRAPPER_NUM];
 static bool syscall_4_4_special_wrappers_ready;
 
+/* syscall_dispatch_init() runs before syscall_init(), so the global table
+ * pointer is not populated yet. Mirror syscall_init()'s symbol-based compat
+ * detection instead of inspecting compat_sys_call_table directly. */
+static bool syscall_4_4_compat_layer_present(void)
+{
+    return kallsyms_lookup_name("compat_sys_call_table") ||
+           kallsyms_lookup_name("compat_sys_openat");
+}
+
 static int syscall_4_4_resolve_special_wrappers(void)
 {
     int found = 0;
@@ -690,7 +699,8 @@ static int syscall_4_4_resolve_special_wrappers(void)
         }
     }
 
-    int required = compat_sys_call_table ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
+    int required = syscall_4_4_compat_layer_present()
+        ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
     syscall_4_4_special_wrappers_ready =
         syscall_4_4_special_wrapper_addrs[0] != 0 && found >= required;
 
@@ -1001,7 +1011,7 @@ static int syscall_dispatch_4_4_init(void)
     el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
-    int required_wrappers = compat_sys_call_table
+    int required_wrappers = syscall_4_4_compat_layer_present()
         ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
     if (!syscall_4_4_special_wrapper_addrs[0] ||
         special_wrappers < required_wrappers) {
