@@ -672,7 +672,8 @@ extern void __noreturn kp_syscall_4_4_resume_special(uintptr_t frame, uintptr_t 
 static uintptr_t syscall_4_4_fast_site;
 static uintptr_t syscall_4_4_trace_site;
 static uintptr_t syscall_4_4_fast_return;
-static uintptr_t syscall_4_4_trace_return;
+/* Read by the 4.4 special-wrapper trace trampoline after the handler returns. */
+uintptr_t kp_syscall_4_4_trace_return;
 static uint32_t syscall_4_4_fast_backup[3];
 static uint32_t syscall_4_4_trace_backup[3];
 
@@ -929,7 +930,7 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
     if (syscall_4_4_nr_is_valid(nr, is_compat))
         handler = syscalln_addr((int)nr, is_compat);
     if (syscall_4_4_is_special_wrapper(handler)) {
-        target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
+        target = trace ? kp_syscall_4_4_trace_return : syscall_4_4_fast_return;
         if (!target)
             target = trace ? syscall_4_4_trace_site + 12 : syscall_4_4_fast_return;
         kp_syscall_4_4_resume_special(frame, handler, target, trace ? 1 : 0);
@@ -966,7 +967,7 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
     ret = (long)regs->regs[0];
 
 resume:
-    target = trace ? syscall_4_4_trace_return : syscall_4_4_fast_return;
+    target = trace ? kp_syscall_4_4_trace_return : syscall_4_4_fast_return;
     if (!target)
         target = trace ? syscall_4_4_trace_site + 12 : syscall_4_4_fast_return;
 
@@ -1064,10 +1065,10 @@ static int syscall_dispatch_4_4_init(void)
         return -ENOENT;
     }
 
-    syscall_4_4_trace_return = 0;
+    kp_syscall_4_4_trace_return = 0;
     if (!syscall_4_4_find_sites(el0_svc, &fast, &trace)) {
         /* The trace return is immediately after the original STR X0 instruction. */
-        syscall_4_4_trace_return = trace + 12;
+        kp_syscall_4_4_trace_return = trace + 12;
     } else {
         log_boot("4.4 dispatcher: syscall dispatch sites not found near el0_svc\\n");
         return -ENOENT;
@@ -1111,7 +1112,7 @@ static int syscall_dispatch_4_4_init(void)
     syscall_hook_global = 1;
 
     log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx, global syscall hook enabled\\n",
-             fast, trace, syscall_4_4_fast_return, syscall_4_4_trace_return);
+             fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return);
     return 0;
 }
 
