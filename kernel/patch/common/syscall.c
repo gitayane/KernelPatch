@@ -36,6 +36,13 @@ KP_EXPORT_SYMBOL(has_syscall_wrapper);
 int has_config_compat = 0;
 KP_EXPORT_SYMBOL(has_config_compat);
 
+/*
+ * Set only if an experimental Linux 4.4 entry-site patch cannot be fully
+ * restored after an error. In that case per-syscall hooks must not be layered
+ * over potentially mixed entry paths.
+ */
+static volatile int syscall_4_4_backend_unsafe;
+
 struct user_arg_ptr
 {
     union
@@ -289,6 +296,8 @@ hook_err_t fp_wrap_syscalln(int nr, int narg, int is_compat, void *before, void 
 {
     hook_err_t rc;
 
+    if (syscall_4_4_backend_unsafe) return -HOOK_BAD_ADDRESS;
+
     if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0) &&
         syscall_hook_global_enabled()) return HOOK_BAD_ADDRESS;
 
@@ -333,6 +342,8 @@ hook_err_t inline_wrap_syscalln(int nr, int narg, int is_compat, void *before, v
 {
     uintptr_t addr;
     hook_err_t rc;
+
+    if (syscall_4_4_backend_unsafe) return -HOOK_BAD_ADDRESS;
 
     if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0) &&
         syscall_hook_global_enabled()) return HOOK_BAD_ADDRESS;
@@ -1053,6 +1064,23 @@ static void syscall_dispatch_4_4_probe(void)
              ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
 }
 
+static int syscall_4_4_restore_sites(void *fast_addrs[3], void *trace_addrs[3])
+{
+    int trace_rc = hotpatch(trace_addrs, syscall_4_4_trace_backup, 3);
+    int fast_rc = hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
+
+    if (trace_rc || fast_rc) {
+        syscall_4_4_backend_unsafe = 1;
+        log_boot("4.4 dispatcher: entry-site rollback failed (trace=%d fast=%d); reject syscall hooks\\n",
+                 trace_rc, fast_rc);
+        return -EIO;
+    }
+
+    syscall_4_4_fast_site = 0;
+    syscall_4_4_trace_site = 0;
+    return 0;
+}
+
 static int syscall_dispatch_4_4_init(void)
 {
     uintptr_t el0_svc;
@@ -1117,18 +1145,16 @@ static int syscall_dispatch_4_4_init(void)
 
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
-        log_boot("4.4 dispatcher: fast site patch rc=%d\\n", rc);
-        return rc;
+        int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
+        log_boot("4.4 dispatcher: fast site patch rc=%d rollback rc=%d\\n", rc, rollback_rc);
+        return rollback_rc ? rollback_rc : rc;
     }
 
     rc = hotpatch(trace_addrs, trace_patch, 3);
     if (rc) {
-        /* Roll back the fast site if the trace site could not be patched. */
-        hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
-        log_boot("4.4 dispatcher: trace site patch rc=%d, fast site restored\\n", rc);
-        syscall_4_4_fast_site = 0;
-        syscall_4_4_trace_site = 0;
-        return rc;
+        int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
+        log_boot("4.4 dispatcher: trace site patch rc=%d rollback rc=%d\\n", rc, rollback_rc);
+        return rollback_rc ? rollback_rc : rc;
     }
 
     syscall_hook_handler_granular = 1;
@@ -1149,7 +1175,9 @@ void syscall_dispatch_init(void)
      * device. Default builds only perform the read-only probe and keep legacy
      * per-syscall hooks. Set KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=1 in an
      * explicit test build to attempt installation before any syscall hooks are
-     * registered. Any reported init failure leaves the legacy backend selected.
+     * registered. A reported failure falls back only after successful rollback;
+     * if rollback itself fails, syscall-hook registration is rejected instead
+     * of mixing the experimental entry path with legacy per-syscall hooks.
      */
     if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
         if (KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER) {
@@ -1157,8 +1185,13 @@ void syscall_dispatch_init(void)
             log_boot("4.4 global syscall dispatcher: experimental opt-in enabled\\n");
             rc = syscall_dispatch_4_4_init();
             if (rc) {
-                log_boot("4.4 global syscall dispatcher init failed rc=%d; keep per-syscall hooks\\n", rc);
-                syscall_dispatch_4_4_probe();
+                if (syscall_4_4_backend_unsafe) {
+                    log_boot("4.4 global syscall dispatcher init failed rc=%d; entry state uncertain, syscall hooks disabled\\n",
+                             rc);
+                } else {
+                    log_boot("4.4 global syscall dispatcher init failed rc=%d; keep per-syscall hooks\\n", rc);
+                    syscall_dispatch_4_4_probe();
+                }
             }
         } else {
             log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\\n");
