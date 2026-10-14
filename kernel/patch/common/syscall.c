@@ -1048,6 +1048,12 @@ static int syscall_dispatch_4_4_init(void)
         return -EBUSY;
     }
 
+    /* syscall_4_4_invoke_original() uses the legacy raw-argument ABI. */
+    if (has_syscall_wrapper) {
+        log_boot("4.4 dispatcher: pt_regs syscall-wrapper ABI is unsupported; keep per-syscall hooks\n");
+        return -EINVAL;
+    }
+
     el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
