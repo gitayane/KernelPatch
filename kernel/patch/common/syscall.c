@@ -862,9 +862,19 @@ static long syscall_4_4_invoke_original(struct pt_regs *regs, long nr, int is_co
     if (!addr) return -ENOSYS;
 
     /*
-     * Linux ARM64 syscall handlers use x0..x5. Passing six arguments is ABI
-     * compatible with handlers that consume fewer arguments; unused registers
-     * are simply ignored by the callee.
+     * Kernels with ARCH_HAS_SYSCALL_WRAPPER expose table entries that take a
+     * pt_regs pointer, not six raw C arguments. The entry frame is still live
+     * here; pass it through unchanged instead of unpacking it into the wrong
+     * ABI. Special assembly wrappers are tail-dispatched before reaching here.
+     */
+    if (has_syscall_wrapper) {
+        return ((warp_raw_syscall_f)addr)(regs);
+    }
+
+    /*
+     * On kernels without syscall wrappers, ARM64 syscall handlers use x0..x5.
+     * Passing six arguments is ABI compatible with handlers that consume fewer
+     * arguments; unused registers are simply ignored by the callee.
      */
     return ((raw_syscall6_f)addr)(
         (long)regs->regs[0],
@@ -1048,11 +1058,11 @@ static int syscall_dispatch_4_4_init(void)
         return -EBUSY;
     }
 
-    /* syscall_4_4_invoke_original() uses the legacy raw-argument ABI. */
-    if (has_syscall_wrapper) {
-        log_boot("4.4 dispatcher: pt_regs syscall-wrapper ABI is unsupported; keep per-syscall hooks\n");
-        return -EINVAL;
-    }
+    /*
+     * syscall_4_4_invoke_original() now follows has_syscall_wrapper and passes
+     * the live pt_regs frame to wrapper handlers. Special assembly wrappers
+     * are still tail-dispatched with their original stack convention.
+     */
 
     el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
