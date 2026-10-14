@@ -675,9 +675,9 @@ static const char *const syscall_4_4_special_wrapper_names[] = {
 static uintptr_t syscall_4_4_special_wrapper_addrs[SYSCALL_4_4_SPECIAL_WRAPPER_NUM];
 static bool syscall_4_4_special_wrappers_ready;
 
-/* syscall_dispatch_init() runs before syscall_init(), so the global table
- * pointer is not populated yet. Mirror syscall_init()'s symbol-based compat
- * detection instead of inspecting compat_sys_call_table directly. */
+/* Some 4.4 builds can expose compat handlers without a resolved
+ * compat_sys_call_table pointer. Mirror syscall_init()'s symbol-based compat
+ * detection instead of relying only on that pointer. */
 static bool syscall_4_4_compat_layer_present(void)
 {
     return kallsyms_lookup_name("compat_sys_call_table") ||
