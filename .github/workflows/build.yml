@@ -14,6 +14,11 @@ on:
         required: true
         type: boolean
         default: false
+      enable_xzp_44_dispatcher:
+        description: "EXPERIMENTAL: enable the Linux 4.4 global syscall dispatcher in the Android kpimg"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   Build-on-Ubuntu:
@@ -54,14 +59,20 @@ jobs:
           export TARGET_COMPILE=`pwd`/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-
           cd kernel
 
+          EXPERIMENTAL_44_DISPATCHER=0
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_dispatcher }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+          fi
+          echo "Linux 4.4 experimental dispatcher build flag: ${EXPERIMENTAL_44_DISPATCHER}"
+
           export ANDROID=1
-          make hdr kpimg
+          make hdr kpimg KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=${EXPERIMENTAL_44_DISPATCHER}
           mv kpimg kpimg-android
           mv kpimg.elf kpimg.elf-android
           make clean
 
           unset ANDROID
-          make
+          make KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=${EXPERIMENTAL_44_DISPATCHER}
           mv kpimg kpimg-linux
           mv kpimg.elf kpimg.elf-linux
 
