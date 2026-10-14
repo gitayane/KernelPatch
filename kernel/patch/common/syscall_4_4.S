@@ -40,6 +40,56 @@ kp_syscall_4_4_trace_entry:
 
 
 /*
+ * Pass through syscalls which have no registered KP callback. Restore the
+ * original pt_regs stack/register convention, then perform the same table
+ * lookup and handler call that the overwritten entry sequence performed.
+ */
+    .global kp_syscall_4_4_passthrough_fast
+    .type kp_syscall_4_4_passthrough_fast, %function
+kp_syscall_4_4_passthrough_fast:
+    mov x9, x0
+    ldp x19, x20, [x9, #0]
+    ldp x21, x22, [x9, #16]
+    ldp x23, x24, [x9, #32]
+    ldp x25, x26, [x9, #48]
+    ldp x27, x28, [x9, #64]
+    ldp x29, x30, [x9, #80]
+    add sp, x9, #96
+    ldp x0, x1, [sp, #0]
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldr x16, [x27, x26, lsl #3]
+    blr x16
+    adrp x16, syscall_4_4_fast_return
+    ldr x16, [x16, :lo12:syscall_4_4_fast_return]
+    br x16
+    .size kp_syscall_4_4_passthrough_fast, .-kp_syscall_4_4_passthrough_fast
+
+    .global kp_syscall_4_4_passthrough_trace
+    .type kp_syscall_4_4_passthrough_trace, %function
+kp_syscall_4_4_passthrough_trace:
+    mov x9, x0
+    ldp x19, x20, [x9, #0]
+    ldp x21, x22, [x9, #16]
+    ldp x23, x24, [x9, #32]
+    ldp x25, x26, [x9, #48]
+    ldp x27, x28, [x9, #64]
+    ldp x29, x30, [x9, #80]
+    add sp, x9, #96
+    ldp x0, x1, [sp, #0]
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
+    ldr x16, [x27, x26, lsl #3]
+    blr x16
+    str x0, [sp, #0]
+    adrp x16, kp_syscall_4_4_trace_return
+    ldr x16, [x16, :lo12:kp_syscall_4_4_trace_return]
+    br x16
+    .size kp_syscall_4_4_passthrough_trace, .-kp_syscall_4_4_passthrough_trace
+
+/*
  * Resume the original 4.4 entry path after the C dispatcher has completed.
  * x0=frame below pt_regs, x1=return value, x2=continuation address.
  * Restore the original kernel callee-saved registers and the pt_regs SP before

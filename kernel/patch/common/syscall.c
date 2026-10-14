@@ -686,11 +686,13 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 extern void kp_syscall_4_4_fast_entry(void);
 extern void kp_syscall_4_4_trace_entry(void);
 extern void __noreturn kp_syscall_4_4_resume(uintptr_t frame, long ret, uintptr_t target);
+extern void __noreturn kp_syscall_4_4_passthrough_fast(uintptr_t frame);
+extern void __noreturn kp_syscall_4_4_passthrough_trace(uintptr_t frame);
 extern void __noreturn kp_syscall_4_4_resume_special(uintptr_t frame, uintptr_t handler, uintptr_t target, int trace);
 
 static uintptr_t syscall_4_4_fast_site;
 static uintptr_t syscall_4_4_trace_site;
-static uintptr_t syscall_4_4_fast_return;
+uintptr_t syscall_4_4_fast_return;
 /* Read by the 4.4 special-wrapper trace trampoline after the handler returns. */
 uintptr_t kp_syscall_4_4_trace_return;
 static uint32_t syscall_4_4_fast_backup[3];
@@ -921,6 +923,20 @@ static bool syscall_4_4_nr_is_valid(unsigned long nr, int is_compat)
 #endif
 }
 
+static bool syscall_4_4_has_registered_hook(int nr, int is_compat)
+{
+    int high = syscall_hook_high;
+    if (high > SYSCALL_HOOK_SLOT_NUM) high = SYSCALL_HOOK_SLOT_NUM;
+
+    for (int i = 0; i < high; i++) {
+        if (syscall_hooks[i].state != CHAIN_ITEM_STATE_READY) continue;
+        if (syscall_hooks[i].nr != nr || syscall_hooks[i].is_compat != is_compat) continue;
+        return true;
+    }
+
+    return false;
+}
+
 static bool syscall_4_4_hook_target_is_special(int nr, int is_compat)
 {
     if (kver < VERSION(4, 4, 0) || kver >= VERSION(4, 5, 0)) return false;
@@ -944,6 +960,29 @@ static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long 
 
     is_compat = compat_user_mode(regs) ? 1 : 0;
     regs->syscallno = (long)nr;
+
+    if (!syscall_4_4_nr_is_valid(nr, is_compat)) {
+        ret = -ENOSYS;
+        regs->regs[0] = (uint64_t)ret;
+        target = trace ? kp_syscall_4_4_trace_return : syscall_4_4_fast_return;
+        if (!target && trace) target = syscall_4_4_trace_site + 12;
+        kp_syscall_4_4_resume(frame, ret, target);
+        __builtin_unreachable();
+    }
+
+    /*
+     * The experimental backend must not call every syscall-table entry as a
+     * C function. Most syscalls have no KP callback; replay the original
+     * LDR/BLR + fast/trace continuation with SP restored to the pt_regs frame.
+     * This keeps ordinary syscalls and assembly wrappers on their native ABI.
+     */
+    if (!syscall_4_4_has_registered_hook((int)nr, is_compat)) {
+        if (trace)
+            kp_syscall_4_4_passthrough_trace(frame);
+        else
+            kp_syscall_4_4_passthrough_fast(frame);
+        __builtin_unreachable();
+    }
 
     /*
      * Do not call pt_regs/argument-repacking wrappers as ordinary C functions.
