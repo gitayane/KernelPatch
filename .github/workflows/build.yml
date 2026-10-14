@@ -20,7 +20,12 @@ on:
         type: boolean
         default: false
       enable_xzp_44_fast_only_test:
-        description: "DIAGNOSTIC ONLY: patch the normal fast syscall entry but leave the trace/audit entry unchanged; requires the dispatcher option above"
+        description: "DIAGNOSTIC ONLY: patch fast entry, then route through C dispatcher; leaves trace/audit entry unchanged"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_fast_bypass_test:
+        description: "DIAGNOSTIC ONLY: patch fast entry but bypass C dispatcher entirely; leaves trace/audit entry unchanged and disables syscall callbacks"
         required: true
         type: boolean
         default: false
@@ -66,6 +71,7 @@ jobs:
 
           EXPERIMENTAL_44_DISPATCHER=0
           EXPERIMENTAL_44_FAST_ONLY=0
+          EXPERIMENTAL_44_FAST_BYPASS=0
           if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_dispatcher }}" == "true" ]]; then
             EXPERIMENTAL_44_DISPATCHER=1
           fi
@@ -76,15 +82,31 @@ jobs:
             fi
             EXPERIMENTAL_44_FAST_ONLY=1
           fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_fast_bypass_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Fast-bypass diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" ]]; then
+              echo "::error::Fast-bypass and fast-only modes are mutually exclusive"
+              exit 1
+            fi
+            EXPERIMENTAL_44_FAST_BYPASS=1
+          fi
           if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[fast-only]') }}" == "true" ]]; then
             EXPERIMENTAL_44_DISPATCHER=1
             EXPERIMENTAL_44_FAST_ONLY=1
           fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[fast-bypass]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_FAST_BYPASS=1
+          fi
           echo "Linux 4.4 experimental dispatcher build flag: ${EXPERIMENTAL_44_DISPATCHER}"
           echo "Linux 4.4 fast-only diagnostic build flag: ${EXPERIMENTAL_44_FAST_ONLY}"
+          echo "Linux 4.4 fast-bypass diagnostic build flag: ${EXPERIMENTAL_44_FAST_BYPASS}"
 
           export ANDROID=1
-          make hdr kpimg KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=${EXPERIMENTAL_44_DISPATCHER} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=${EXPERIMENTAL_44_FAST_ONLY}
+          make hdr kpimg KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=${EXPERIMENTAL_44_DISPATCHER} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=${EXPERIMENTAL_44_FAST_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=${EXPERIMENTAL_44_FAST_BYPASS}
           mv kpimg kpimg-android
           mv kpimg.elf kpimg.elf-android
           make clean
@@ -92,7 +114,7 @@ jobs:
           unset ANDROID
           # The opt-in is deliberately limited to the Android image used on XZP.
           # Keep the generic Linux image on the default legacy syscall path.
-          make KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=0
+          make KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=0
           mv kpimg kpimg-linux
           mv kpimg.elf kpimg.elf-linux
 

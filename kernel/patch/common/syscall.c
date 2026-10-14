@@ -384,6 +384,22 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "FAST_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS
+#define KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "FAST_BYPASS diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
+#error "FAST_BYPASS and FAST_ONLY diagnostic modes are mutually exclusive"
+#endif
+
 /*
  * Global syscall dispatcher.
  *
@@ -697,6 +713,7 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 
 extern void kp_syscall_4_4_fast_entry(void);
 extern void kp_syscall_4_4_trace_entry(void);
+extern void kp_syscall_4_4_fast_bypass_entry(void);
 extern void __noreturn kp_syscall_4_4_resume(uintptr_t frame, long ret, uintptr_t target);
 extern void __noreturn kp_syscall_4_4_passthrough_fast(uintptr_t frame);
 extern void __noreturn kp_syscall_4_4_passthrough_trace(uintptr_t frame);
@@ -1180,7 +1197,11 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_site = fast;
     syscall_4_4_trace_site = trace;
 
-    if (!syscall_4_4_make_branch(fast, (uintptr_t)&kp_syscall_4_4_fast_entry, fast_patch) ||
+    uintptr_t fast_entry_target = (uintptr_t)&kp_syscall_4_4_fast_entry;
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS
+    fast_entry_target = (uintptr_t)&kp_syscall_4_4_fast_bypass_entry;
+#endif
+    if (!syscall_4_4_make_branch(fast, fast_entry_target, fast_patch) ||
         !syscall_4_4_make_branch(trace, (uintptr_t)&kp_syscall_4_4_trace_entry, trace_patch)) {
         log_boot("4.4 dispatcher: KP entry outside ADRP range\\n");
         return -ERANGE;
@@ -1200,6 +1221,21 @@ static int syscall_dispatch_4_4_init(void)
         log_boot("4.4 dispatcher: fast site patch rc=%d rollback rc=%d\n", rc, rollback_rc);
         return rollback_rc ? rollback_rc : rc;
     }
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS
+    /*
+     * Diagnostic mode: the fast entry is redirected to a pure assembly
+     * pass-through which does not call the C dispatcher or touch pt_regs.
+     * Leave the trace/audit entry unchanged. This intentionally disables KP
+     * syscall callbacks and is only a control-flow isolation test.
+     */
+    syscall_hook_handler_granular = 1;
+    syscall_hook_barrier();
+    syscall_hook_global = 1;
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx; FAST-BYPASS diagnostic mode enabled, C dispatcher and trace site untouched\\n",
+             fast, trace, syscall_4_4_fast_return);
+    return 0;
+#endif
 
 #if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
     /*

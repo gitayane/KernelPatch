@@ -90,6 +90,26 @@ kp_syscall_4_4_passthrough_trace:
     .size kp_syscall_4_4_passthrough_trace, .-kp_syscall_4_4_passthrough_trace
 
 /*
+ * Minimal diagnostic pass-through: do not call C, do not adjust SP, and do
+ * not touch the pt_regs frame. The original BLR's return address was the
+ * unconditional branch to ret_fast_syscall; use an equivalent local branch.
+ * This mode is solely for isolating patched-entry control flow and bypasses
+ * all KP syscall callbacks.
+ */
+    .global kp_syscall_4_4_fast_bypass_entry
+    .type kp_syscall_4_4_fast_bypass_entry, %function
+kp_syscall_4_4_fast_bypass_entry:
+    ldr x16, [x27, x26, lsl #3]
+    adr x30, kp_syscall_4_4_fast_bypass_return
+    br x16
+kp_syscall_4_4_fast_bypass_return:
+    adrp x16, syscall_4_4_fast_return
+    ldr x16, [x16, :lo12:syscall_4_4_fast_return]
+    br x16
+    .size kp_syscall_4_4_fast_bypass_entry, .-kp_syscall_4_4_fast_bypass_entry
+
+
+/*
  * Resume the original 4.4 entry path after the C dispatcher has completed.
  * x0=frame below pt_regs, x1=return value, x2=continuation address.
  * Restore the original kernel callee-saved registers and the pt_regs SP before
