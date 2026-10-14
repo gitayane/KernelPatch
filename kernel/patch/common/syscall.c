@@ -353,6 +353,14 @@ void inline_unwrap_syscalln(int nr, int is_compat, void *before, void *after)
 }
 KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#define KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER must be 0 or 1"
+#endif
+
 /*
  * Global syscall dispatcher.
  *
@@ -1137,13 +1145,25 @@ void syscall_dispatch_init(void)
     if (syscall_hook_global) return;
 
     /*
-     * Keep the experimental entry-site dispatcher disabled on Linux 4.4 while
-     * validating the XZP 4.4.302 path. The probe is read-only; syscall hooks
-     * continue to use the legacy per-syscall path.
+     * The 4.4 entry-site dispatcher stays opt-in until validated on the target
+     * device. Default builds only perform the read-only probe and keep legacy
+     * per-syscall hooks. Set KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=1 in an
+     * explicit test build to attempt installation before any syscall hooks are
+     * registered. Any reported init failure leaves the legacy backend selected.
      */
     if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
-        log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\n");
-        syscall_dispatch_4_4_probe();
+        if (KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER) {
+            int rc;
+            log_boot("4.4 global syscall dispatcher: experimental opt-in enabled\\n");
+            rc = syscall_dispatch_4_4_init();
+            if (rc) {
+                log_boot("4.4 global syscall dispatcher init failed rc=%d; keep per-syscall hooks\\n", rc);
+                syscall_dispatch_4_4_probe();
+            }
+        } else {
+            log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\\n");
+            syscall_dispatch_4_4_probe();
+        }
         return;
     }
 
