@@ -680,7 +680,8 @@ static bool syscall_4_4_special_wrappers_ready;
  * detection instead of relying only on that pointer. */
 static bool syscall_4_4_compat_layer_present(void)
 {
-    return kallsyms_lookup_name("compat_sys_call_table") ||
+    return kallsyms_lookup_name("__arm64_compat_sys_openat") ||
+           kallsyms_lookup_name("compat_sys_call_table") ||
            kallsyms_lookup_name("compat_sys_openat");
 }
 
