@@ -268,19 +268,44 @@ long raw_syscall6(long nr, long arg0, long arg1, long arg2, long arg3, long arg4
 }
 KP_EXPORT_SYMBOL(raw_syscall6);
 
+/*
+ * The dispatcher cannot safely take over after any legacy syscall-table hooks
+ * have been installed: a table slot may then point at a hook-chain transit,
+ * which is not a syscall handler that the new backend may call as an origin.
+ * Record successful legacy registrations before the dispatcher starts and fail
+ * closed if the experimental 4.4 backend is ever enabled in that state.
+ */
+static volatile int syscall_4_4_legacy_slot_hooks_seen;
+
+static void syscall_4_4_note_legacy_slot_hook(void)
+{
+    if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0) &&
+        !syscall_hook_global_enabled()) {
+        syscall_4_4_legacy_slot_hooks_seen = 1;
+    }
+}
+
 hook_err_t fp_wrap_syscalln(int nr, int narg, int is_compat, void *before, void *after, void *udata)
 {
+    hook_err_t rc;
+
+    if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0) &&
+        syscall_hook_global_enabled()) return HOOK_BAD_ADDRESS;
+
     if (!is_compat) {
         if (!sys_call_table) return HOOK_BAD_ADDRESS;
         uintptr_t fp_addr = (uintptr_t)(sys_call_table + nr);
         if (has_syscall_wrapper) narg = 1;
-        return fp_hook_wrap(fp_addr, narg, before, after, udata);
+        rc = fp_hook_wrap(fp_addr, narg, before, after, udata);
     } else {
         if (!compat_sys_call_table) return HOOK_BAD_ADDRESS;
         uintptr_t fp_addr = (uintptr_t)(compat_sys_call_table + nr);
         if (has_syscall_wrapper) narg = 1;
-        return fp_hook_wrap(fp_addr, narg, before, after, udata);
+        rc = fp_hook_wrap(fp_addr, narg, before, after, udata);
     }
+
+    if (!rc) syscall_4_4_note_legacy_slot_hook();
+    return rc;
 }
 KP_EXPORT_SYMBOL(fp_wrap_syscalln);
 
@@ -306,10 +331,18 @@ b #0xfffffffffeb452f4
 */
 hook_err_t inline_wrap_syscalln(int nr, int narg, int is_compat, void *before, void *after, void *udata)
 {
-    uintptr_t addr = syscalln_name_addr(nr, is_compat);
+    uintptr_t addr;
+    hook_err_t rc;
+
+    if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0) &&
+        syscall_hook_global_enabled()) return HOOK_BAD_ADDRESS;
+
+    addr = syscalln_name_addr(nr, is_compat);
     if (!addr) return -HOOK_BAD_ADDRESS;
     if (has_syscall_wrapper) narg = 1;
-    return hook_wrap((void *)addr, narg, before, after, udata);
+    rc = hook_wrap((void *)addr, narg, before, after, udata);
+    if (!rc) syscall_4_4_note_legacy_slot_hook();
+    return rc;
 }
 KP_EXPORT_SYMBOL(inline_wrap_syscalln);
 
@@ -1008,6 +1041,11 @@ static int syscall_dispatch_4_4_init(void)
     uintptr_t trace;
     uint32_t fast_patch[3];
     uint32_t trace_patch[3];
+
+    if (syscall_4_4_legacy_slot_hooks_seen) {
+        log_boot("4.4 dispatcher: legacy syscall-table hooks already registered; refuse backend switch\n");
+        return -EBUSY;
+    }
 
     el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
