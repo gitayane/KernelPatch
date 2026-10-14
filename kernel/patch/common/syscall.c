@@ -22,6 +22,8 @@
 #include <kallsyms.h>
 #include <kp_spinlock.h>
 #include <linux/kernel.h>
+#include <linux/stop_machine.h>
+#include <ksyms.h>
 #include <linux/string.h>
 
 uintptr_t *sys_call_table = 0;
@@ -398,6 +400,95 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 
 #if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
 #error "FAST_BYPASS and FAST_ONLY diagnostic modes are mutually exclusive"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
+#define KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "PATCH_RESTORE diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS)
+#error "PATCH_RESTORE is mutually exclusive with FAST_ONLY and FAST_BYPASS"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
+typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
+typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
+                                           const struct cpumask *cpus);
+
+struct syscall_4_4_patch_restore_ctx {
+    void *addrs[3];
+    uint32_t patch[3];
+    uint32_t backup[3];
+    syscall_4_4_insn_patch_nosync_fn patch_nosync;
+    int patch_rc;
+    int restore_rc;
+    int ran;
+};
+
+static int syscall_4_4_patch_restore_write(struct syscall_4_4_patch_restore_ctx *ctx,
+                                           int index, uint32_t insn)
+{
+    int rc = -ENOENT;
+
+    if (ctx->patch_nosync)
+        rc = ctx->patch_nosync(ctx->addrs[index], insn);
+    if (!rc)
+        return 0;
+
+    /* Fallback if the kernel's native nosync text writer is unavailable. */
+    return hotpatch_nosync(ctx->addrs[index], insn);
+}
+
+/*
+ * Run while stop_machine has every other CPU quiesced. Temporarily write the
+ * exact three-instruction branch patch and restore the original instructions
+ * before any CPU can execute the trampoline. This separates patch installation
+ * from runtime execution of the entry trampoline.
+ */
+static int syscall_4_4_patch_restore_test_cb(void *arg)
+{
+    struct syscall_4_4_patch_restore_ctx *ctx = arg;
+
+    ctx->ran = 1;
+    for (int i = 0; i < 3; i++) {
+        int rc = syscall_4_4_patch_restore_write(ctx, i, ctx->patch[i]);
+        if (rc) {
+            ctx->patch_rc = rc;
+            break;
+        }
+    }
+
+    /* Restore every original word, even if the replacement write failed early. */
+    for (int i = 0; i < 3; i++) {
+        int rc = syscall_4_4_patch_restore_write(ctx, i, ctx->backup[i]);
+        if (rc && !ctx->restore_rc)
+            ctx->restore_rc = rc;
+    }
+
+    /*
+     * One more full restoration pass using KP's direct nosync writer. This is
+     * a best-effort recovery while all CPUs are still stopped.
+     */
+    if (ctx->restore_rc) {
+        int retry_rc = 0;
+        for (int i = 0; i < 3; i++) {
+            int rc = hotpatch_nosync(ctx->addrs[i], ctx->backup[i]);
+            if (rc && !retry_rc)
+                retry_rc = rc;
+        }
+        ctx->restore_rc = retry_rc;
+    }
+
+    return ctx->restore_rc ? ctx->restore_rc : ctx->patch_rc;
+}
 #endif
 
 /*
@@ -1214,6 +1305,54 @@ static int syscall_dispatch_4_4_init(void)
 
     void *fast_addrs[3] = {(void *)fast, (void *)(fast + 4), (void *)(fast + 8)};
     void *trace_addrs[3] = {(void *)trace, (void *)(trace + 4), (void *)(trace + 8)};
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
+    {
+        struct syscall_4_4_patch_restore_ctx test = {0};
+        uintptr_t stop_addr = kallsyms_lookup_name("stop_machine");
+        syscall_4_4_stop_machine_fn stop_fn =
+            (syscall_4_4_stop_machine_fn)stop_addr;
+
+        if (!stop_fn) {
+            log_boot("4.4 dispatcher PATCH-RESTORE: stop_machine unavailable; no entry-site write attempted\\n");
+            return -ENOENT;
+        }
+
+        test.addrs[0] = fast_addrs[0];
+        test.addrs[1] = fast_addrs[1];
+        test.addrs[2] = fast_addrs[2];
+        test.patch[0] = fast_patch[0];
+        test.patch[1] = fast_patch[1];
+        test.patch[2] = fast_patch[2];
+        test.backup[0] = syscall_4_4_fast_backup[0];
+        test.backup[1] = syscall_4_4_fast_backup[1];
+        test.backup[2] = syscall_4_4_fast_backup[2];
+        test.patch_nosync =
+            (syscall_4_4_insn_patch_nosync_fn)
+            kallsyms_lookup_name("aarch64_insn_patch_text_nosync");
+
+        int stop_rc = stop_fn(syscall_4_4_patch_restore_test_cb, &test, 0);
+        if (!test.ran) {
+            log_boot("4.4 dispatcher PATCH-RESTORE: stop_machine callback did not run rc=%d\\n",
+                     stop_rc);
+            return stop_rc ? stop_rc : -EIO;
+        }
+        if (test.restore_rc) {
+            syscall_4_4_backend_unsafe = 1;
+            log_boot("4.4 dispatcher PATCH-RESTORE: CRITICAL original instruction restore failed rc=%d; syscall hooks disabled\\n",
+                     test.restore_rc);
+            return -EIO;
+        }
+        if (test.patch_rc || stop_rc) {
+            log_boot("4.4 dispatcher PATCH-RESTORE: temporary patch failed patch_rc=%d stop_rc=%d; original instructions restored\\n",
+                     test.patch_rc, stop_rc);
+            return test.patch_rc ? test.patch_rc : stop_rc;
+        }
+
+        log_boot("4.4 dispatcher PATCH-RESTORE passed: branch encoding/write/restore succeeded; trampoline was never executed\\n");
+        return 0;
+    }
+#endif
 
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
