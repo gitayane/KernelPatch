@@ -418,6 +418,22 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "PATCH_RESTORE is mutually exclusive with FAST_ONLY and FAST_BYPASS"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "PREPARE_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE)
+#error "PREPARE_ONLY is mutually exclusive with FAST_ONLY, FAST_BYPASS, and PATCH_RESTORE"
+#endif
+
 #if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
 typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
 typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
@@ -1297,6 +1313,24 @@ static int syscall_dispatch_4_4_init(void)
         log_boot("4.4 dispatcher: KP entry outside ADRP range\\n");
         return -ERANGE;
     }
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY
+    /*
+     * Read-only diagnostic: execute symbol lookup, special-wrapper resolution,
+     * entry-site discovery, and branch encoding, but do not write kernel text,
+     * invoke stop_machine, or change global syscall-hook state. It narrows
+     * failures between dispatcher setup and any entry-site patch operation.
+     */
+    log_boot("4.4 dispatcher PREPARE-ONLY: fast=%llx trace=%llx ret_fast=%llx\\n",
+             fast, trace, syscall_4_4_fast_return);
+    log_boot("4.4 dispatcher PREPARE-ONLY original fast=%08x/%08x/%08x trace=%08x/%08x/%08x\\n",
+             ((uint32_t *)fast)[0], ((uint32_t *)fast)[1], ((uint32_t *)fast)[2],
+             ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
+    log_boot("4.4 dispatcher PREPARE-ONLY encoded fast=%08x/%08x/%08x trace=%08x/%08x/%08x; NO TEXT WRITES ATTEMPTED\\n",
+             fast_patch[0], fast_patch[1], fast_patch[2],
+             trace_patch[0], trace_patch[1], trace_patch[2]);
+    return 0;
+#endif
 
     for (int i = 0; i < 3; i++) {
         syscall_4_4_fast_backup[i] = ((uint32_t *)fast)[i];
