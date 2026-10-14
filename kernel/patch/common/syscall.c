@@ -405,9 +405,20 @@ static int syscall_hook_collect(int nr, int is_compat, int gate_ok, struct sysca
     return n;
 }
 
+/* Implemented with the Linux 4.4 special-wrapper table below. */
+static bool syscall_4_4_hook_target_is_special(int nr, int is_compat);
+
 static hook_err_t syscall_hook_add(int nr, int is_compat, void *before, void *after, void *udata, int allow_skip,
                                    int bypass_gate)
 {
+    /* Special 4.4 wrappers tail-dispatch with the original pt_regs stack and
+     * cannot run the generic callback chain. Reject such registrations rather
+     * than reporting success for a hook that would never be invoked. */
+    if (syscall_hook_global && syscall_4_4_hook_target_is_special(nr, is_compat)) {
+        logkv("syscall hook rejected: 4.4 special wrapper nr=%d compat=%d\n", nr, is_compat);
+        return -HOOK_BAD_ADDRESS;
+    }
+
     unsigned long flags = kp_private_spin_lock(&syscall_hook_lock);
 
     for (int i = 0; i < SYSCALL_HOOK_SLOT_NUM; i++) {
@@ -662,6 +673,7 @@ static const char *const syscall_4_4_special_wrapper_names[] = {
     (sizeof(syscall_4_4_special_wrapper_names) / sizeof(syscall_4_4_special_wrapper_names[0]))
 
 static uintptr_t syscall_4_4_special_wrapper_addrs[SYSCALL_4_4_SPECIAL_WRAPPER_NUM];
+static bool syscall_4_4_special_wrappers_ready;
 
 static int syscall_4_4_resolve_special_wrappers(void)
 {
@@ -677,6 +689,10 @@ static int syscall_4_4_resolve_special_wrappers(void)
                      syscall_4_4_special_wrapper_names[i]);
         }
     }
+
+    int required = compat_sys_call_table ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
+    syscall_4_4_special_wrappers_ready =
+        syscall_4_4_special_wrapper_addrs[0] != 0 && found >= required;
 
     return found;
 }
@@ -829,6 +845,15 @@ static bool syscall_4_4_nr_is_valid(unsigned long nr, int is_compat)
 #else
     return nr < 460;
 #endif
+}
+
+static bool syscall_4_4_hook_target_is_special(int nr, int is_compat)
+{
+    if (kver < VERSION(4, 4, 0) || kver >= VERSION(4, 5, 0)) return false;
+    if (!syscall_4_4_special_wrappers_ready) return false;
+    if (!syscall_4_4_nr_is_valid((unsigned long)nr, is_compat)) return false;
+
+    return syscall_4_4_is_special_wrapper(syscalln_addr(nr, is_compat));
 }
 
 static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace, uintptr_t frame)
