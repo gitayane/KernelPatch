@@ -1224,15 +1224,13 @@ static int syscall_dispatch_4_4_init(void)
 
 #if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS
     /*
-     * Diagnostic mode: the fast entry is redirected to a pure assembly
-     * pass-through which does not call the C dispatcher or touch pt_regs.
-     * Leave the trace/audit entry unchanged. This intentionally disables KP
-     * syscall callbacks and is only a control-flow isolation test.
+     * Diagnostic mode: redirect the fast entry through a pure assembly
+     * pass-through without calling the C dispatcher or touching pt_regs.
+     * Leave the trace/audit entry and global-hook state unchanged, so later
+     * registrations continue to use the legacy per-syscall hook path. This
+     * isolates entry/return control flow from global-dispatcher registration.
      */
-    syscall_hook_handler_granular = 1;
-    syscall_hook_barrier();
-    syscall_hook_global = 1;
-    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx; FAST-BYPASS diagnostic mode enabled, C dispatcher and trace site untouched\\n",
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx; FAST-BYPASS diagnostic mode enabled, global hook state unchanged and trace site untouched\\n",
              fast, trace, syscall_4_4_fast_return);
     return 0;
 #endif
