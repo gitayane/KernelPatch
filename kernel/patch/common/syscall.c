@@ -1368,17 +1368,16 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: read the first three raw pointers from the static
-     * wrapper-name table but do not dereference them or call kallsyms. This
-     * distinguishes a bad relocated pointer table from lookup/logging issues.
+     * Diagnostic mode: use the first name from the static table for one exact
+     * symbol lookup. Do not iterate, write the shared address array, inspect
+     * compat support, or dereference the name for logging.
      */
     uintptr_t wrapper_name0 = (uintptr_t)syscall_4_4_special_wrapper_names[0];
-    uintptr_t wrapper_name1 = (uintptr_t)syscall_4_4_special_wrapper_names[1];
-    uintptr_t wrapper_name2 = (uintptr_t)syscall_4_4_special_wrapper_names[2];
-    log_boot("4.4 dispatcher WRAPPER-TABLE-POINTERS-ONLY: el0_svc=%llx ret_fast=%llx name_ptrs=%llx/%llx/%llx; no dereference or lookup; use legacy hooks\n",
+    uintptr_t wrapper_result0 =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[0]);
+    log_boot("4.4 dispatcher WRAPPER-TABLE-FIRST-LOOKUP-ONLY: el0_svc=%llx ret_fast=%llx name_ptr=%llx resolved=%llx; one lookup only; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
-             (uint64_t)wrapper_name0, (uint64_t)wrapper_name1,
-             (uint64_t)wrapper_name2);
+             (uint64_t)wrapper_name0, (uint64_t)wrapper_result0);
     return -EAGAIN;
 #endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
