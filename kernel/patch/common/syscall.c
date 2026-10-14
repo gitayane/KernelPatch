@@ -1071,7 +1071,7 @@ static int syscall_4_4_restore_sites(void *fast_addrs[3], void *trace_addrs[3])
 
     if (trace_rc || fast_rc) {
         syscall_4_4_backend_unsafe = 1;
-        log_boot("4.4 dispatcher: entry-site rollback failed (trace=%d fast=%d); reject syscall hooks\\n",
+        log_boot("4.4 dispatcher: entry-site rollback failed (trace=%d fast=%d); reject syscall hooks\n",
                  trace_rc, fast_rc);
         return -EIO;
     }
@@ -1146,14 +1146,14 @@ static int syscall_dispatch_4_4_init(void)
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
         int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
-        log_boot("4.4 dispatcher: fast site patch rc=%d rollback rc=%d\\n", rc, rollback_rc);
+        log_boot("4.4 dispatcher: fast site patch rc=%d rollback rc=%d\n", rc, rollback_rc);
         return rollback_rc ? rollback_rc : rc;
     }
 
     rc = hotpatch(trace_addrs, trace_patch, 3);
     if (rc) {
         int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
-        log_boot("4.4 dispatcher: trace site patch rc=%d rollback rc=%d\\n", rc, rollback_rc);
+        log_boot("4.4 dispatcher: trace site patch rc=%d rollback rc=%d\n", rc, rollback_rc);
         return rollback_rc ? rollback_rc : rc;
     }
 
@@ -1182,19 +1182,19 @@ void syscall_dispatch_init(void)
     if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
         if (KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER) {
             int rc;
-            log_boot("4.4 global syscall dispatcher: experimental opt-in enabled\\n");
+            log_boot("4.4 global syscall dispatcher: experimental opt-in enabled\n");
             rc = syscall_dispatch_4_4_init();
             if (rc) {
                 if (syscall_4_4_backend_unsafe) {
-                    log_boot("4.4 global syscall dispatcher init failed rc=%d; entry state uncertain, syscall hooks disabled\\n",
+                    log_boot("4.4 global syscall dispatcher init failed rc=%d; entry state uncertain, syscall hooks disabled\n",
                              rc);
                 } else {
-                    log_boot("4.4 global syscall dispatcher init failed rc=%d; keep per-syscall hooks\\n", rc);
+                    log_boot("4.4 global syscall dispatcher init failed rc=%d; keep per-syscall hooks\n", rc);
                     syscall_dispatch_4_4_probe();
                 }
             }
         } else {
-            log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\\n");
+            log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\n");
             syscall_dispatch_4_4_probe();
         }
         return;
