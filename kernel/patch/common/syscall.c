@@ -943,7 +943,7 @@ static const char *const syscall_4_4_special_wrapper_names[] = {
 #define SYSCALL_4_4_SPECIAL_WRAPPER_NUM \
     (sizeof(syscall_4_4_special_wrapper_names) / sizeof(syscall_4_4_special_wrapper_names[0]))
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
-#define SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT 7
+#define SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT 3
 #else
 #define SYSCALL_4_4_SPECIAL_WRAPPER_LOOKUP_LIMIT SYSCALL_4_4_SPECIAL_WRAPPER_NUM
 #endif
@@ -978,7 +978,7 @@ static int syscall_4_4_resolve_special_wrappers(void)
 
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: resolve only the first seven wrapper names, then
+     * Diagnostic mode: resolve only the first three wrapper names, then
      * return through the legacy-hook fallback without compat probes, site
      * discovery, or any kernel-text modification.
      */
@@ -1408,7 +1408,7 @@ static int syscall_dispatch_4_4_init(void)
 #endif
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
-    log_boot("4.4 dispatcher WRAPPER-PREFIX-ONLY: resolved=%d/7 names 1-7 of %d; native_rt_sigreturn=%llx; skipped remaining wrappers, compat probes and site setup; use legacy hooks\n",
+    log_boot("4.4 dispatcher WRAPPER-PREFIX-ONLY: resolved=%d/3 names 1-3 of %d; native_rt_sigreturn=%llx; skipped remaining wrappers, compat probes and site setup; use legacy hooks\n",
              special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
              (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
     return -EAGAIN;
