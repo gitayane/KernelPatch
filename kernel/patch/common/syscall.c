@@ -615,7 +615,7 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
  */
 #define KP4_SYSCALL_LDR_X16_SCNO 0xf87a7b70u
 #define KP4_SYSCALL_BLR_X16      0xd63f0200u
-#define KP4_SYSCALL_STR_X0_SP_MASK 0xffc003ffu
+/* Exact STR X0, [SP] encoding used to save the syscall return value. */
 #define KP4_SYSCALL_STR_X0_SP      0xf90003e0u
 #define KP4_SYSCALL_B_MASK        0xfc000000u
 #define KP4_SYSCALL_B             0x14000000u
@@ -712,7 +712,8 @@ static uintptr_t syscall_4_4_b_target(uintptr_t pc, uint32_t insn)
 
 static bool syscall_4_4_is_str_x0_sp(uint32_t insn)
 {
-    return (insn & KP4_SYSCALL_STR_X0_SP_MASK) == KP4_SYSCALL_STR_X0_SP;
+    /* The destination must be pt_regs->regs[0], at offset zero from SP. */
+    return insn == KP4_SYSCALL_STR_X0_SP;
 }
 
 /*
