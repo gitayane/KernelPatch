@@ -482,6 +482,22 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "WRAPPER_FIRST_ONLY is mutually exclusive with other dispatcher diagnostic modes"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "WRAPPER_LIST_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY)
+#error "WRAPPER_LIST_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
 #if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
 typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
 typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
@@ -939,6 +955,16 @@ static int syscall_4_4_resolve_special_wrappers(void)
         }
     }
 
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
+    /*
+     * Diagnostic mode: exercise every exact-name special-wrapper lookup and
+     * its existing unresolved-symbol logging, but avoid all compat-layer
+     * probes so the two phases can be tested independently.
+     */
+    syscall_4_4_special_wrappers_ready = false;
+    return found;
+#endif
+
     int required = syscall_4_4_compat_layer_present()
         ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
     syscall_4_4_special_wrappers_ready =
@@ -1350,6 +1376,12 @@ static int syscall_dispatch_4_4_init(void)
     return -EAGAIN;
 #endif
     int special_wrappers = syscall_4_4_resolve_special_wrappers();
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
+    log_boot("4.4 dispatcher WRAPPER-LIST-ONLY: resolved=%d/%d native_rt_sigreturn=%llx; skipped compat probes and site setup; use legacy hooks\n",
+             special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
+    return -EAGAIN;
+#endif
     int required_wrappers = syscall_4_4_compat_layer_present()
         ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY
