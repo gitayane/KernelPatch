@@ -8,14 +8,14 @@
     .type kp_syscall_4_4_fast_entry, %function
 kp_syscall_4_4_fast_entry:
     /* Preserve the exception-entry callee-saved register state below pt_regs. */
-    sub sp, sp, #112
+    sub sp, sp, #96
     stp x19, x20, [sp, #0]
     stp x21, x22, [sp, #16]
     stp x23, x24, [sp, #32]
     stp x25, x26, [sp, #48]
     stp x27, x28, [sp, #64]
     stp x29, x30, [sp, #80]
-    add x0, sp, #112
+    add x0, sp, #96
     mov x1, x26
     mov x2, sp
     b kp_syscall_4_4_fast_dispatch
@@ -25,14 +25,14 @@ kp_syscall_4_4_fast_entry:
     .type kp_syscall_4_4_trace_entry, %function
 kp_syscall_4_4_trace_entry:
     /* Keep the same frame layout as the fast path. */
-    sub sp, sp, #112
+    sub sp, sp, #96
     stp x19, x20, [sp, #0]
     stp x21, x22, [sp, #16]
     stp x23, x24, [sp, #32]
     stp x25, x26, [sp, #48]
     stp x27, x28, [sp, #64]
     stp x29, x30, [sp, #80]
-    add x0, sp, #112
+    add x0, sp, #96
     mov x1, x26
     mov x2, sp
     b kp_syscall_4_4_trace_dispatch
@@ -58,7 +58,7 @@ kp_syscall_4_4_resume:
     ldp x25, x26, [x9, #48]
     ldp x27, x28, [x9, #64]
     ldp x29, x30, [x9, #80]
-    add sp, x9, #112
+    add sp, x9, #96
     mov x0, x10
     br x11
     .size kp_syscall_4_4_resume, .-kp_syscall_4_4_resume
@@ -87,38 +87,30 @@ kp_syscall_4_4_resume_special:
     ldp x25, x26, [x9, #48]
     ldp x27, x28, [x9, #64]
     ldp x29, x30, [x9, #80]
-    add x13, x9, #112
+    add x13, x9, #96
     ldp x0, x1, [x13, #0]
     ldp x2, x3, [x13, #16]
     ldp x4, x5, [x13, #32]
     ldp x6, x7, [x13, #48]
-    add sp, x9, #112
+    add sp, x9, #96
     cbz x12, 1f
-    /*
-     * Keep the continuation in the stack frame rather than a callee-saved
-     * register. compat_sys_{rt_}sigreturn_wrapper intentionally clears x27
-     * to suppress syscall-restart handling; the trace return path must not
-     * restore the old x27 value and undo that ABI side effect.
-     */
-    str x11, [x9, #96]
     adr x30, kp_syscall_4_4_special_trace_return
     br x10
 1:
     mov x30, x11
     br x10
 kp_syscall_4_4_special_trace_return:
-    /* Mirror the original STR X0,[sp] at the patched trace site. */
+    /* Mirror the original STR X0,[SP] at the patched trace site. */
     str x0, [sp, #0]
-    /* SP is pt_regs again; recover the saved frame below it. */
-    sub x9, sp, #112
-    ldr x10, [x9, #96]
-    ldp x19, x20, [x9, #0]
-    ldp x21, x22, [x9, #16]
-    ldp x23, x24, [x9, #32]
-    ldp x25, x26, [x9, #48]
-    /* Preserve x27 as returned by the special wrapper; restore x28 only. */
-    ldr x28, [x9, #72]
-    ldp x29, x30, [x9, #80]
-    add sp, x9, #112
+    /*
+     * Do not read the saved frame below pt_regs after the handler returns:
+     * the handler's downward-growing stack may have reused that memory.
+     * The wrapper preserves x19-x28 by ABI except for intentional x27 changes
+     * (sigreturn clears x27), which must remain intact here.
+     */
+    adrp x10, kp_syscall_4_4_trace_return
+    ldr x10, [x10, :lo12:kp_syscall_4_4_trace_return]
+    /* Original BLR would leave LR at the STR instruction (continuation - 4). */
+    sub x30, x10, #4
     br x10
     .size kp_syscall_4_4_resume_special, .-kp_syscall_4_4_resume_special
