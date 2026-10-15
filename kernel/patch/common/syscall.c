@@ -1368,23 +1368,18 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: keep loop-based name lookup, but store each result
-     * into a local array only through constant-index branches. This tests
-     * whether the dynamic-index array store is the failing construct. No
+     * Diagnostic mode: retain dynamic-index loop stores, but mark the local
+     * result array volatile to force observable element accesses. This tests
+     * whether store lowering/optimization contributes to the failure. No
      * shared result-table writes, compat probes, or entry-site modifications.
      */
-    uintptr_t wrapper_results[3] = { 0, 0, 0 };
+    volatile uintptr_t wrapper_results[3] = { 0, 0, 0 };
     for (unsigned int i = 0; i < 3; i++) {
         uintptr_t resolved =
             kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
-        if (i == 0)
-            wrapper_results[0] = resolved;
-        else if (i == 1)
-            wrapper_results[1] = resolved;
-        else
-            wrapper_results[2] = resolved;
+        wrapper_results[i] = resolved;
     }
-    log_boot("4.4 dispatcher WRAPPER-LOOP-CONSTANT-ARRAY-RESULT-STORES: el0_svc=%llx ret_fast=%llx resolved=%llx/%llx/%llx; constant-index local stores; use legacy hooks\n",
+    log_boot("4.4 dispatcher WRAPPER-LOOP-VOLATILE-DYNAMIC-ARRAY-STORES: el0_svc=%llx ret_fast=%llx resolved=%llx/%llx/%llx; volatile dynamic-index stores; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
              (uint64_t)wrapper_results[0], (uint64_t)wrapper_results[1],
              (uint64_t)wrapper_results[2]);
