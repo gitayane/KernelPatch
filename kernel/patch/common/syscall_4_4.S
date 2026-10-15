@@ -93,8 +93,8 @@ kp_syscall_4_4_passthrough_trace:
  * Minimal diagnostic pass-through: do not call C, do not adjust SP, and do
  * not touch the pt_regs frame. The original BLR's return address was the
  * unconditional branch to ret_fast_syscall; use an equivalent local branch.
- * This mode is solely for isolating patched-entry control flow and bypasses
- * all KP syscall callbacks.
+ * This mode isolates patched-entry control flow without entering the global
+ * C dispatcher; syscall-table handler hooks remain on the normal handler path.
  */
     .global kp_syscall_4_4_fast_bypass_entry
     .type kp_syscall_4_4_fast_bypass_entry, %function
