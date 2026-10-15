@@ -959,22 +959,55 @@ static int syscall_4_4_resolve_special_wrappers(void)
 {
     int found = 0;
 
+    /*
+     * Keep every destination index constant. On this XZP/4.4 path, dynamic
+     * array stores in the same loop as kallsyms_lookup_name have correlated
+     * with boot loops, while constant-index stores have booted successfully.
+     */
+    syscall_4_4_special_wrapper_addrs[0] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[0]);
+    syscall_4_4_special_wrapper_addrs[1] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[1]);
+    syscall_4_4_special_wrapper_addrs[2] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[2]);
+    syscall_4_4_special_wrapper_addrs[3] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[3]);
+    syscall_4_4_special_wrapper_addrs[4] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[4]);
+    syscall_4_4_special_wrapper_addrs[5] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[5]);
+    syscall_4_4_special_wrapper_addrs[6] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[6]);
+    syscall_4_4_special_wrapper_addrs[7] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[7]);
+    syscall_4_4_special_wrapper_addrs[8] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[8]);
+    syscall_4_4_special_wrapper_addrs[9] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[9]);
+    syscall_4_4_special_wrapper_addrs[10] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[10]);
+    syscall_4_4_special_wrapper_addrs[11] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[11]);
+    syscall_4_4_special_wrapper_addrs[12] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[12]);
+    syscall_4_4_special_wrapper_addrs[13] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[13]);
+
     for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_NUM; i++) {
-        syscall_4_4_special_wrapper_addrs[i] =
-            kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
         if (syscall_4_4_special_wrapper_addrs[i]) {
             found++;
         } else {
+#if !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
             log_boot("4.4 dispatcher: unresolved special wrapper %s\n",
                      syscall_4_4_special_wrapper_names[i]);
+#endif
         }
     }
 
-#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: exercise every exact-name special-wrapper lookup and
-     * its existing unresolved-symbol logging, but avoid all compat-layer
-     * probes so the two phases can be tested independently.
+     * Diagnostic modes exercise the wrapper lookups/stores but stop before
+     * compat-layer probes, entry scanning, branch encoding, or text patching.
      */
     syscall_4_4_special_wrappers_ready = false;
     return found;
@@ -1368,21 +1401,17 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: retain dynamic-index loop stores, but mark the local
-     * result array volatile to force observable element accesses. This tests
-     * whether store lowering/optimization contributes to the failure. No
-     * shared result-table writes, compat probes, or entry-site modifications.
+     * Diagnostic mode: run the full wrapper resolver using constant-index
+     * table stores, then return before compat probing and dispatcher setup.
+     * This exercises the production lookup table without dynamic-index writes.
      */
-    volatile uintptr_t wrapper_results[3] = { 0, 0, 0 };
-    for (unsigned int i = 0; i < 3; i++) {
-        uintptr_t resolved =
-            kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
-        wrapper_results[i] = resolved;
-    }
-    log_boot("4.4 dispatcher WRAPPER-LOOP-VOLATILE-DYNAMIC-ARRAY-STORES: el0_svc=%llx ret_fast=%llx resolved=%llx/%llx/%llx; volatile dynamic-index stores; use legacy hooks\n",
+    int wrapper_count = syscall_4_4_resolve_special_wrappers();
+    log_boot("4.4 dispatcher WRAPPER-ALL-CONSTANT-GLOBAL-STORES: el0_svc=%llx ret_fast=%llx found=%d/%d table=%llx/%llx/%llx; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
-             (uint64_t)wrapper_results[0], (uint64_t)wrapper_results[1],
-             (uint64_t)wrapper_results[2]);
+             wrapper_count, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0],
+             (uint64_t)syscall_4_4_special_wrapper_addrs[1],
+             (uint64_t)syscall_4_4_special_wrapper_addrs[2]);
     return -EAGAIN;
 #endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
