@@ -48,7 +48,9 @@ kp_syscall_4_4_trace_entry:
     .type kp_syscall_4_4_trace_bypass_entry, %function
 kp_syscall_4_4_trace_bypass_entry:
     ldr x16, [x27, x26, lsl #3]
-    blr x16
+    adr x30, kp_syscall_4_4_trace_bypass_return
+    br x16
+kp_syscall_4_4_trace_bypass_return:
     str x0, [sp, #0]
     adrp x16, kp_syscall_4_4_trace_return
     ldr x16, [x16, :lo12:kp_syscall_4_4_trace_return]
