@@ -1511,8 +1511,8 @@ static int syscall_dispatch_4_4_init(void)
         uintptr_t bounds_branch_addr = trace - 20;
         uint32_t bounds_cmp = ((uint32_t *)trace)[-6];
         uint32_t bounds_branch = ((uint32_t *)trace)[-5];
-        int32_t imm19;
-        intptr_t branch_delta;
+        long imm19;
+        long branch_delta;
         uintptr_t invalid_target;
 
         /* cmp x26, x25; b.hs __ni_sys_trace (known 4.4 entry sequence). */
@@ -1522,10 +1522,10 @@ static int syscall_dispatch_4_4_init(void)
             return -ENOENT;
         }
 
-        imm19 = (int32_t)((bounds_branch >> 5) & 0x7ffffu);
-        if (imm19 & 0x40000) imm19 |= ~0x7ffff;
-        branch_delta = (intptr_t)imm19 * 4;
-        invalid_target = (uintptr_t)((intptr_t)bounds_branch_addr + branch_delta);
+        imm19 = (long)((bounds_branch >> 5) & 0x7ffffu);
+        if (imm19 & 0x40000) imm19 -= 0x80000;
+        branch_delta = imm19 * 4;
+        invalid_target = (uintptr_t)((long)bounds_branch_addr + branch_delta);
         if (invalid_target <= trace || invalid_target > trace + 0x100) {
             log_boot("4.4 dispatcher TRACE-BYPASS: decoded __ni_sys_trace target out of range (%llx); no trace-site write\n",
                      (uint64_t)invalid_target);
