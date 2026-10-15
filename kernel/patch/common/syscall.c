@@ -1368,19 +1368,23 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: write only the first three resolutions into the shared
-     * address table using a bounded indexed loop. Do not log unresolved names,
-     * check compat support, or modify entry-site state.
+     * Diagnostic mode: query and store the first three entries using constant
+     * indexes only. This avoids both a loop variable and indexed array stores.
+     * Do not log unresolved names, probe compat support, or patch entry sites.
      */
-    for (unsigned int i = 0; i < 3; i++) {
-        syscall_4_4_special_wrapper_addrs[i] =
-            kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
-    }
-    log_boot("4.4 dispatcher WRAPPER-TABLE-THREE-LOOP-GLOBAL-STORE: el0_svc=%llx ret_fast=%llx resolved=%llx/%llx/%llx; first three shared slots only; use legacy hooks\n",
+    uintptr_t wrapper_result0 =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[0]);
+    uintptr_t wrapper_result1 =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[1]);
+    uintptr_t wrapper_result2 =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[2]);
+    syscall_4_4_special_wrapper_addrs[0] = wrapper_result0;
+    syscall_4_4_special_wrapper_addrs[1] = wrapper_result1;
+    syscall_4_4_special_wrapper_addrs[2] = wrapper_result2;
+    log_boot("4.4 dispatcher WRAPPER-TABLE-FIRST-THREE-CONSTANT-STORES: el0_svc=%llx ret_fast=%llx resolved=%llx/%llx/%llx; no indexed loop stores; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
-             (uint64_t)syscall_4_4_special_wrapper_addrs[0],
-             (uint64_t)syscall_4_4_special_wrapper_addrs[1],
-             (uint64_t)syscall_4_4_special_wrapper_addrs[2]);
+             (uint64_t)wrapper_result0, (uint64_t)wrapper_result1,
+             (uint64_t)wrapper_result2);
     return -EAGAIN;
 #endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
