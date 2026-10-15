@@ -1586,22 +1586,17 @@ static int syscall_dispatch_4_4_init(void)
 
 #if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY
     /*
-     * Isolate the __sys_trace entry now that the TRACE_ONLY build flag is
-     * verified end-to-end. Only the trace handler-selection site is patched;
-     * fast syscalls and the legacy per-syscall hook registration remain
-     * untouched. This deliberately does NOT enable syscall_hook_global.
+     * Live trace-site patching is disabled after the dev.127 panic
+     * (PC=0x400800, LR=__ni_sys_trace+8). Keep this mode read-only until
+     * compat and slow-path control flow have been validated. The probe records
+     * the original instructions and proposed branch, then falls back to the
+     * legacy syscall-table hooks without modifying kernel text.
      */
-    int trace_rc = hotpatch(trace_addrs, trace_patch, 3);
-    if (trace_rc) {
-        int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
-        log_boot("4.4 dispatcher TRACE-ONLY: trace site patch rc=%d rollback rc=%d\\n",
-                 trace_rc, rollback_rc);
-        return rollback_rc ? rollback_rc : trace_rc;
-    }
-
-    log_boot("4.4 dispatcher TRACE-ONLY ACTIVE: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx; trace site patched, fast site untouched; global hook disabled, legacy syscall-table hooks retained\\n",
-             fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return);
-    return 0;
+    log_boot("4.4 dispatcher TRACE-ONLY PREFLIGHT (no text writes after dev.127 panic): fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx; trace_orig=%08x/%08x/%08x trace_branch=%08x/%08x/%08x; NO TEXT WRITES, legacy syscall-table hooks retained\\n",
+             fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return,
+             ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2],
+             trace_patch[0], trace_patch[1], trace_patch[2]);
+    return -EAGAIN;
 #else
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
