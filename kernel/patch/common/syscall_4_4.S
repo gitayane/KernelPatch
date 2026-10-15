@@ -47,6 +47,9 @@ kp_syscall_4_4_trace_entry:
     .global kp_syscall_4_4_trace_bypass_entry
     .type kp_syscall_4_4_trace_bypass_entry, %function
 kp_syscall_4_4_trace_bypass_entry:
+    /* Recheck the original scno < sc_nr invariant before indexing stbl. */
+    cmp x26, x25
+    b.hs 1f
     ldr x16, [x27, x26, lsl #3]
     adr x30, kp_syscall_4_4_trace_bypass_return
     br x16
@@ -54,6 +57,11 @@ kp_syscall_4_4_trace_bypass_return:
     str x0, [sp, #0]
     adrp x16, kp_syscall_4_4_trace_return
     ldr x16, [x16, :lo12:kp_syscall_4_4_trace_return]
+    br x16
+1:
+    /* Preserve the native invalid/compat-private syscall handling path. */
+    adrp x16, kp_syscall_4_4_trace_invalid_target
+    ldr x16, [x16, :lo12:kp_syscall_4_4_trace_invalid_target]
     br x16
     .size kp_syscall_4_4_trace_bypass_entry, .-kp_syscall_4_4_trace_bypass_entry
 

@@ -928,6 +928,8 @@ static uintptr_t syscall_4_4_trace_site;
 uintptr_t syscall_4_4_fast_return;
 /* Read by the 4.4 special-wrapper trace trampoline after the handler returns. */
 uintptr_t kp_syscall_4_4_trace_return;
+/* Original out-of-range syscall path guarded by the trace bypass. */
+uintptr_t kp_syscall_4_4_trace_invalid_target;
 static uint32_t syscall_4_4_fast_backup[3];
 static uint32_t syscall_4_4_trace_backup[3];
 
@@ -1498,6 +1500,44 @@ static int syscall_dispatch_4_4_init(void)
         return -ENOENT;
     }
 
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+    /*
+     * The trace-site LDR is only valid after the original scno < sc_nr check.
+     * Guard again in the assembly bypass so an out-of-range compat/private
+     * syscall can never index past compat_sys_call_table. Decode the existing
+     * B.hs target and retain the kernel's original __ni_sys_trace path.
+     */
+    {
+        uintptr_t bounds_branch_addr = trace - 20;
+        uint32_t bounds_cmp = ((uint32_t *)trace)[-6];
+        uint32_t bounds_branch = ((uint32_t *)trace)[-5];
+        int32_t imm19;
+        intptr_t branch_delta;
+        uintptr_t invalid_target;
+
+        /* cmp x26, x25; b.hs __ni_sys_trace (known 4.4 entry sequence). */
+        if (bounds_cmp != 0xeb19035fu ||
+            (bounds_branch & 0xff00001fu) != 0x54000002u) {
+            log_boot("4.4 dispatcher TRACE-BYPASS: syscall bounds guard not found before trace site; no trace-site write\n");
+            return -ENOENT;
+        }
+
+        imm19 = (int32_t)((bounds_branch >> 5) & 0x7ffffu);
+        if (imm19 & 0x40000) imm19 |= ~0x7ffff;
+        branch_delta = (intptr_t)imm19 * 4;
+        invalid_target = (uintptr_t)((intptr_t)bounds_branch_addr + branch_delta);
+        if (invalid_target <= trace || invalid_target > trace + 0x100) {
+            log_boot("4.4 dispatcher TRACE-BYPASS: decoded __ni_sys_trace target out of range (%llx); no trace-site write\n",
+                     (uint64_t)invalid_target);
+            return -ENOENT;
+        }
+        kp_syscall_4_4_trace_invalid_target = invalid_target;
+        log_boot("4.4 dispatcher TRACE-BYPASS guard ready: cmp=%llx branch=%llx insn=%08x __ni_sys_trace=%llx\n",
+                 (uint64_t)(trace - 24), (uint64_t)bounds_branch_addr,
+                 bounds_branch, (uint64_t)invalid_target);
+    }
+#endif
+
     syscall_4_4_fast_site = fast;
     syscall_4_4_trace_site = trace;
 
@@ -1621,8 +1661,9 @@ static int syscall_dispatch_4_4_init(void)
                  trace_rc);
         return trace_rc;
     }
-    log_boot("4.4 dispatcher TRACE-BYPASS ACTIVE: trace=%llx ret=%llx; assembly replays original LDR/BLR/STR, C dispatcher untouched, global hook disabled, legacy syscall-table hooks retained\\n",
-             trace, kp_syscall_4_4_trace_return);
+    log_boot("4.4 dispatcher TRACE-BYPASS ACTIVE: trace=%llx ret=%llx invalid_target=%llx; guarded assembly replay, out-of-range syscall numbers branch to original __ni_sys_trace; C dispatcher untouched, global hook disabled, legacy syscall-table hooks retained\n",
+             trace, kp_syscall_4_4_trace_return,
+             kp_syscall_4_4_trace_invalid_target);
     return 0;
 #else
     int rc = hotpatch(fast_addrs, fast_patch, 3);
