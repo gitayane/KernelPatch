@@ -1004,10 +1004,10 @@ static int syscall_4_4_resolve_special_wrappers(void)
         }
     }
 
-#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
     /*
-     * Diagnostic modes exercise the wrapper lookups/stores but stop before
-     * compat-layer probes, entry scanning, branch encoding, or text patching.
+     * The wrapper-list-only mode stops here so lookup behavior can be tested
+     * independently from compat-layer symbol probes.
      */
     syscall_4_4_special_wrappers_ready = false;
     return found;
@@ -1401,14 +1401,15 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: run the full wrapper resolver using constant-index
-     * table stores, then return before compat probing and dispatcher setup.
-     * This exercises the production lookup table without dynamic-index writes.
+     * Diagnostic mode: run constant-index wrapper-table stores and the
+     * compat-layer symbol probe, then return before entry scanning, branch
+     * encoding, or text patching.
      */
     int wrapper_count = syscall_4_4_resolve_special_wrappers();
-    log_boot("4.4 dispatcher WRAPPER-ALL-CONSTANT-GLOBAL-STORES: el0_svc=%llx ret_fast=%llx found=%d/%d table=%llx/%llx/%llx; use legacy hooks\n",
+    log_boot("4.4 dispatcher WRAPPER-ALL-CONSTANT-STORES-COMPAT-PROBE: el0_svc=%llx ret_fast=%llx found=%d/%d ready=%d table=%llx/%llx/%llx; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
              wrapper_count, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
+             syscall_4_4_special_wrappers_ready ? 1 : 0,
              (uint64_t)syscall_4_4_special_wrapper_addrs[0],
              (uint64_t)syscall_4_4_special_wrapper_addrs[1],
              (uint64_t)syscall_4_4_special_wrapper_addrs[2]);
