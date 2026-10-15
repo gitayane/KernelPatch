@@ -38,6 +38,23 @@ kp_syscall_4_4_trace_entry:
     b kp_syscall_4_4_trace_dispatch
     .size kp_syscall_4_4_trace_entry, .-kp_syscall_4_4_trace_entry
 
+/*
+ * Trace-site diagnostic bypass. Replay the three overwritten kernel
+ * instructions with the original pt_regs stack and argument registers, but
+ * do not enter the KP C dispatcher or allocate a private frame. This site is
+ * normally reached only after the kernel's syscall-number bounds check.
+ */
+    .global kp_syscall_4_4_trace_bypass_entry
+    .type kp_syscall_4_4_trace_bypass_entry, %function
+kp_syscall_4_4_trace_bypass_entry:
+    ldr x16, [x27, x26, lsl #3]
+    blr x16
+    str x0, [sp, #0]
+    adrp x16, kp_syscall_4_4_trace_return
+    ldr x16, [x16, :lo12:kp_syscall_4_4_trace_return]
+    br x16
+    .size kp_syscall_4_4_trace_bypass_entry, .-kp_syscall_4_4_trace_bypass_entry
+
 
 /*
  * Pass through syscalls which have no registered KP callback. Restore the
