@@ -1498,8 +1498,8 @@ static int syscall_dispatch_4_4_init(void)
     /*
      * Read-only diagnostic: execute symbol lookup, special-wrapper resolution,
      * entry-site discovery, and branch encoding, but do not write kernel text,
-     * invoke stop_machine, or change global syscall-hook state. It narrows
-     * failures between dispatcher setup and any entry-site patch operation.
+     * invoke stop_machine, or change global syscall-hook state. Return an
+     * explicit fallback status because the global dispatcher is not installed.
      */
     log_boot("4.4 dispatcher PREPARE-ONLY: fast=%llx trace=%llx ret_fast=%llx\\n",
              fast, trace, syscall_4_4_fast_return);
@@ -1509,7 +1509,7 @@ static int syscall_dispatch_4_4_init(void)
     log_boot("4.4 dispatcher PREPARE-ONLY encoded fast=%08x/%08x/%08x trace=%08x/%08x/%08x; NO TEXT WRITES ATTEMPTED\\n",
              fast_patch[0], fast_patch[1], fast_patch[2],
              trace_patch[0], trace_patch[1], trace_patch[2]);
-    return 0;
+    return -EAGAIN;
 #endif
 
     for (int i = 0; i < 3; i++) {
