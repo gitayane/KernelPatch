@@ -1603,7 +1603,7 @@ static int syscall_dispatch_4_4_init(void)
      * entry is patched here; switching registration to a global callback list
      * would leave ordinary fast syscalls outside that list.
      */
-    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx; TRACE-ONLY diagnostic mode enabled, legacy syscall-table hooks retained and fast site untouched\n",
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx; TRACE-ONLY diagnostic mode enabled; trace trampoline active; legacy syscall-table hooks retained, fast site untouched\n",
              fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return);
     return 0;
 #else
