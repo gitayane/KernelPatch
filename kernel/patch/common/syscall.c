@@ -1368,18 +1368,19 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: resolve three names using fixed calls and store each
-     * returned address into a local array using constant indexes. No loop,
-     * shared result-table writes, compat probes, or entry-site modifications.
+     * Diagnostic mode: resolve the first three names in a loop, but make the
+     * lookup result an explicit scalar temporary before the dynamic-index
+     * local-array store. This isolates direct call-result assignments from
+     * indexed stores. No shared result-table writes, compat probes, or
+     * entry-site modifications.
      */
     uintptr_t wrapper_results[3] = { 0, 0, 0 };
-    wrapper_results[0] =
-        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[0]);
-    wrapper_results[1] =
-        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[1]);
-    wrapper_results[2] =
-        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[2]);
-    log_boot("4.4 dispatcher WRAPPER-TABLE-LOCAL-CONSTANT-RESULT-STORES: el0_svc=%llx ret_fast=%llx resolved=%llx/%llx/%llx; no loop; use legacy hooks\n",
+    for (unsigned int i = 0; i < 3; i++) {
+        uintptr_t resolved =
+            kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
+        wrapper_results[i] = resolved;
+    }
+    log_boot("4.4 dispatcher WRAPPER-TABLE-LOCAL-LOOP-TEMP-RESULT-STORES: el0_svc=%llx ret_fast=%llx resolved=%llx/%llx/%llx; loop with temp; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
              (uint64_t)wrapper_results[0], (uint64_t)wrapper_results[1],
              (uint64_t)wrapper_results[2]);
