@@ -81,10 +81,23 @@ static const struct trusted_manager_entry trusted_managers[] = {
     {
         "me.bmax.apatch",
         {
+            /* Original upstream APatch signing certificate; keep trusted
+             * alongside the XZP custom Manager certificate below. */
             0xd7, 0x1d, 0xad, 0xc0, 0xca, 0x07, 0xbd, 0xf5,
             0x94, 0x38, 0x3b, 0xfb, 0x2a, 0x44, 0x51, 0x34,
             0xa0, 0x73, 0x39, 0xf1, 0x2a, 0x27, 0x04, 0x4a,
             0x1b, 0x32, 0x69, 0x81, 0xac, 0xf5, 0xf3, 0x19
+        }
+    },
+    {
+        "me.bmax.apatch",
+        {
+            /* SHA-256 of the DER certificate used by gitayane/APatch
+             * preview-11296-80 (v2-only signed release APK). */
+            0x9f, 0xb9, 0x61, 0x71, 0x10, 0xc4, 0x69, 0xf2,
+            0x5b, 0x31, 0xd0, 0xcb, 0xa1, 0xfd, 0x0f, 0xe3,
+            0x7d, 0x60, 0x1f, 0xc1, 0x3c, 0xcd, 0xdb, 0x62,
+            0x99, 0x1e, 0x66, 0x4c, 0x50, 0x73, 0xf7, 0xc8
         }
     },
     {
@@ -517,8 +530,6 @@ static int apk_matches_trusted_signature(const char *path, const uint8_t *expect
     }
 
     if (!v2_valid) {
-        log_boot("trusted manager apk sig invalid: v2=%d/%d v3=%d/%d v31=%d/%d\n",
-                 v2_valid, v2_blocks, v3_valid, v3_blocks, v31_valid, v31_blocks);
         goto out;
     }
 
@@ -1087,7 +1098,6 @@ static int refresh_trusted_manager_uid_from_packages_list(uid_t *trusted_uid_out
 
         if (!apk_matches_trusted_signature(
                 apk_path, trusted_managers[i].digest)) {
-            log_boot("apk signature invalid: %s\n", apk_path);
             continue;
         }
 
@@ -1829,16 +1839,21 @@ static kp_dentry_path_raw_t kp_dentry_path_raw;
 
 static void refresh_packages_list_tmp_rename(struct dentry *tmp_dentry)
 {
-    char path[128];
+    char path[256];
     char *buf;
 
     if (!tmp_dentry || !kp_dentry_path_raw) {
         return;
     }
 
+    /*
+     * The stripped KPIMG headers intentionally keep struct dentry opaque.
+     * Resolve the path through the exported helper; deep unrelated paths may
+     * exceed the buffer, which is expected for this broad rename observer.
+     * Ignore those misses quietly and only act on the exact target path below.
+     */
     buf = kp_dentry_path_raw(tmp_dentry, path, sizeof(path));
-    if (IS_ERR(buf)) {
-        log_boot("packages.list rename: dentry_path_raw failed\n");
+    if (IS_ERR_OR_NULL(buf)) {
         return;
     }
 

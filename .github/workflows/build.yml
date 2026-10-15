@@ -1,8 +1,69 @@
 name: Build CI
 
 on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+      - 'work/**'
   workflow_call:
   workflow_dispatch:
+    inputs:
+      publish_preview:
+        description: "Publish a development preview for device testing"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_dispatcher:
+        description: "EXPERIMENTAL: enable the Linux 4.4 global syscall dispatcher in the Android kpimg"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_fast_only_test:
+        description: "DIAGNOSTIC ONLY: patch fast entry, then route through C dispatcher; leaves trace/audit entry unchanged"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_fast_bypass_test:
+        description: "DIAGNOSTIC ONLY: patch fast entry without C dispatcher; leaves trace/audit and global-hook state unchanged, preserving legacy per-syscall hooks"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_trace_bypass_test:
+        description: "DIAGNOSTIC ONLY: patch trace entry and replay LDR/BLR/STR in assembly; no C dispatcher, legacy syscall-table hooks retained"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_patch_restore_test:
+        description: "DIAGNOSTIC ONLY: under stop_machine, write then restore fast-entry instructions without executing the trampoline"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_prepare_only_test:
+        description: "SAFE DIAGNOSTIC: run Linux 4.4 dispatcher symbol/site/branch preparation without changing kernel text"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_symbols_only_test:
+        description: "SAFE DIAGNOSTIC: resolve only el0_svc and ret_fast_syscall, then return to the read-only legacy path"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_wrappers_only_test:
+        description: "SAFE DIAGNOSTIC: resolve special syscall wrappers, then return to the read-only legacy path without site setup"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_wrapper_first_only_test:
+        description: "SAFE DIAGNOSTIC: resolve only sys_rt_sigreturn_wrapper by exact name, then use the legacy path"
+        required: true
+        type: boolean
+        default: false
+      enable_xzp_44_wrapper_list_only_test:
+        description: "SAFE DIAGNOSTIC: resolve the full special-wrapper name list, skip compat-layer symbol probes, then use the legacy path"
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   Build-on-Ubuntu:
@@ -22,8 +83,18 @@ jobs:
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
           VERSION="$MAJOR.$MINOR.$PATCH"
+          if [[ "$GITHUB_REF" == refs/heads/work/* ]]; then
+            RELEASE_TAG="${VERSION}-dev.${GITHUB_RUN_NUMBER}"
+            IS_PRERELEASE=true
+          else
+            RELEASE_TAG="$VERSION"
+            IS_PRERELEASE=false
+          fi
           echo "Generated Version: $VERSION"
+          echo "Release tag: $RELEASE_TAG (prerelease=$IS_PRERELEASE)"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_OUTPUT
       - name: Install Compiler
         run: |
           curl -o arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz https://armkeil.blob.core.windows.net/developer/Files/downloads/gnu/12.2.rel1/binrel/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf.tar.xz
@@ -33,14 +104,211 @@ jobs:
           export TARGET_COMPILE=`pwd`/arm-gnu-toolchain-12.2.rel1-x86_64-aarch64-none-elf/bin/aarch64-none-elf-
           cd kernel
 
+          EXPERIMENTAL_44_DISPATCHER=0
+          EXPERIMENTAL_44_FAST_ONLY=0
+          EXPERIMENTAL_44_TRACE_ONLY=0
+          EXPERIMENTAL_44_TRACE_BYPASS=0
+          EXPERIMENTAL_44_FAST_BYPASS=0
+          EXPERIMENTAL_44_PATCH_RESTORE=0
+          EXPERIMENTAL_44_PREPARE_ONLY=0
+          EXPERIMENTAL_44_SYMBOLS_ONLY=0
+          EXPERIMENTAL_44_WRAPPERS_ONLY=0
+          EXPERIMENTAL_44_WRAPPER_FIRST_ONLY=0
+          EXPERIMENTAL_44_WRAPPER_LIST_ONLY=0
+          EXPERIMENTAL_44_WRAPPER_PREFIX_ONLY=0
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_dispatcher }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_fast_only_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Fast-only diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            EXPERIMENTAL_44_FAST_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_fast_bypass_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Fast-bypass diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" ]]; then
+              echo "::error::Fast-bypass and fast-only modes are mutually exclusive"
+              exit 1
+            fi
+            EXPERIMENTAL_44_FAST_BYPASS=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_trace_bypass_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Trace-bypass diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            EXPERIMENTAL_44_TRACE_BYPASS=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_patch_restore_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Patch-restore diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" ]]; then
+              echo "::error::Patch-restore is mutually exclusive with fast-only and fast-bypass"
+              exit 1
+            fi
+            EXPERIMENTAL_44_PATCH_RESTORE=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_prepare_only_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Prepare-only diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" ]]; then
+              echo "::error::Prepare-only mode is mutually exclusive with other diagnostic modes"
+              exit 1
+            fi
+            EXPERIMENTAL_44_PREPARE_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_symbols_only_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Symbols-only diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" ]]; then
+              echo "::error::Symbols-only mode is mutually exclusive with other diagnostic modes"
+              exit 1
+            fi
+            EXPERIMENTAL_44_SYMBOLS_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_wrappers_only_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Wrappers-only diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" ]]; then
+              echo "::error::Wrappers-only mode is mutually exclusive with other diagnostic modes"
+              exit 1
+            fi
+            EXPERIMENTAL_44_WRAPPERS_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_wrapper_first_only_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Wrapper-first-only diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" ]]; then
+              echo "::error::Wrapper-first-only mode is mutually exclusive with other diagnostic modes"
+              exit 1
+            fi
+            EXPERIMENTAL_44_WRAPPER_FIRST_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.enable_xzp_44_wrapper_list_only_test }}" == "true" ]]; then
+            if [[ "${EXPERIMENTAL_44_DISPATCHER}" != "1" ]]; then
+              echo "::error::Wrapper-list-only diagnostic mode requires enable_xzp_44_dispatcher=true"
+              exit 1
+            fi
+            if [[ "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" ]]; then
+              echo "::error::Wrapper-list-only mode is mutually exclusive with other diagnostic modes"
+              exit 1
+            fi
+            EXPERIMENTAL_44_WRAPPER_LIST_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[fast-only]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_FAST_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[trace-only]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_TRACE_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[trace-bypass]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_TRACE_BYPASS=1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[fast-bypass]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_FAST_BYPASS=1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[patch-restore]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_PATCH_RESTORE=1
+          fi
+          if [[ "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" ) ]]; then
+            echo "::error::Patch-restore is mutually exclusive with fast-only and fast-bypass"
+            exit 1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[prepare-only]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_PREPARE_ONLY=1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[symbols-only]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_SYMBOLS_ONLY=1
+          fi
+          if [[ "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" ) ]]; then
+            echo "::error::Prepare-only mode is mutually exclusive with other diagnostic modes"
+            exit 1
+          fi
+          if [[ "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" ) ]]; then
+            echo "::error::Symbols-only mode is mutually exclusive with other diagnostic modes"
+            exit 1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[wrappers-only]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_WRAPPERS_ONLY=1
+          fi
+          if [[ "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" ) ]]; then
+            echo "::error::Wrappers-only mode is mutually exclusive with other diagnostic modes"
+            exit 1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[wrapper-first]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_WRAPPER_FIRST_ONLY=1
+          fi
+          if [[ "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_LIST_ONLY}" == "1" ) ]]; then
+            echo "::error::Wrapper-first-only mode is mutually exclusive with other diagnostic modes"
+            exit 1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[wrapper-list]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_WRAPPER_LIST_ONLY=1
+          fi
+          if [[ "${EXPERIMENTAL_44_WRAPPER_LIST_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" ) ]]; then
+            echo "::error::Wrapper-list-only mode is mutually exclusive with other diagnostic modes"
+            exit 1
+          fi
+          if [[ "${{ github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]') && contains(github.event.head_commit.message, '[wrapper-prefix]') }}" == "true" ]]; then
+            EXPERIMENTAL_44_DISPATCHER=1
+            EXPERIMENTAL_44_WRAPPER_PREFIX_ONLY=1
+          fi
+          if [[ "${EXPERIMENTAL_44_WRAPPER_PREFIX_ONLY}" == "1" && ( "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_LIST_ONLY}" == "1" ) ]]; then
+            echo "::error::Wrapper-prefix-only mode is mutually exclusive with other diagnostic modes"
+            exit 1
+          fi
+          if [[ "${EXPERIMENTAL_44_TRACE_BYPASS}" == "1" && ( "${EXPERIMENTAL_44_TRACE_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_LIST_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_PREFIX_ONLY}" == "1" ) ]]; then
+            echo "::error::Trace-bypass mode is mutually exclusive with all other diagnostic modes"
+            exit 1
+          fi
+          echo "Linux 4.4 experimental dispatcher build flag: ${EXPERIMENTAL_44_DISPATCHER}"
+          echo "Linux 4.4 fast-only diagnostic build flag: ${EXPERIMENTAL_44_FAST_ONLY}"
+          echo "Linux 4.4 trace-only diagnostic build flag: ${EXPERIMENTAL_44_TRACE_ONLY}"
+          echo "Linux 4.4 trace-bypass diagnostic build flag: ${EXPERIMENTAL_44_TRACE_BYPASS}"
+          echo "Linux 4.4 fast-bypass diagnostic build flag: ${EXPERIMENTAL_44_FAST_BYPASS}"
+          echo "Linux 4.4 patch-restore diagnostic build flag: ${EXPERIMENTAL_44_PATCH_RESTORE}"
+          echo "Linux 4.4 prepare-only diagnostic build flag: ${EXPERIMENTAL_44_PREPARE_ONLY}"
+          echo "Linux 4.4 symbols-only diagnostic build flag: ${EXPERIMENTAL_44_SYMBOLS_ONLY}"
+          echo "Linux 4.4 wrappers-only diagnostic build flag: ${EXPERIMENTAL_44_WRAPPERS_ONLY}"
+          echo "Linux 4.4 wrapper-first-only diagnostic build flag: ${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}"
+          echo "Linux 4.4 wrapper-list-only diagnostic build flag: ${EXPERIMENTAL_44_WRAPPER_LIST_ONLY}"
+          echo "Linux 4.4 wrapper-prefix-only diagnostic build flag: ${EXPERIMENTAL_44_WRAPPER_PREFIX_ONLY}"
+
           export ANDROID=1
-          make hdr kpimg
+          make hdr kpimg KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=${EXPERIMENTAL_44_DISPATCHER} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=${EXPERIMENTAL_44_FAST_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY=${EXPERIMENTAL_44_TRACE_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS=${EXPERIMENTAL_44_TRACE_BYPASS} KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=${EXPERIMENTAL_44_FAST_BYPASS} KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE=${EXPERIMENTAL_44_PATCH_RESTORE} KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY=${EXPERIMENTAL_44_PREPARE_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY=${EXPERIMENTAL_44_SYMBOLS_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY=${EXPERIMENTAL_44_WRAPPERS_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY=${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY=${EXPERIMENTAL_44_WRAPPER_LIST_ONLY} KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY=${EXPERIMENTAL_44_WRAPPER_PREFIX_ONLY}
           mv kpimg kpimg-android
           mv kpimg.elf kpimg.elf-android
           make clean
 
           unset ANDROID
-          make
+          # The opt-in is deliberately limited to the Android image used on XZP.
+          # Keep the generic Linux image on the default legacy syscall path.
+          make KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS=0 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=0 KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE=0 KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY=0
           mv kpimg kpimg-linux
           mv kpimg.elf kpimg.elf-linux
 
@@ -109,10 +377,12 @@ jobs:
           mv kptools kptools-linux
       
       - name: Release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.parse_version.outputs.VERSION }}
+          tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
+          commit: ${{ github.sha }}
           artifacts: |
             kernel/kpimg-linux
             kernel/kpimg-android
@@ -126,6 +396,7 @@ jobs:
           generateReleaseNotes: true
           allowUpdates: true
           replacesArtifacts: true
+          prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
   Build-on-windows:
     runs-on: windows-2022
@@ -136,15 +407,27 @@ jobs:
         uses: actions/checkout@v3
         
       - name: Generate version
+        id: parse_version
         shell: pwsh
         run: |
           $MAJOR = (Select-String -Path version -Pattern '#define MAJOR').Line.Split(' ')[2]
           $MINOR = (Select-String -Path version -Pattern '#define MINOR').Line.Split(' ')[2]
           $PATCH = (Select-String -Path version -Pattern '#define PATCH').Line.Split(' ')[2]
           $VERSION = "$MAJOR.$MINOR.$PATCH"
+          if ($env:GITHUB_REF -like 'refs/heads/work/*') {
+            $RELEASE_TAG = "$VERSION-dev.$env:GITHUB_RUN_NUMBER"
+            $IS_PRERELEASE = "true"
+          } else {
+            $RELEASE_TAG = $VERSION
+            $IS_PRERELEASE = "false"
+          }
           Write-Output "Generated Version: $VERSION"
           "VERSION=$VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RELEASE_TAG=$RELEASE_TAG" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "IS_PRERELEASE=$IS_PRERELEASE" | Out-File -FilePath $env:GITHUB_ENV -Append
           Add-Content -Path $env:GITHUB_OUTPUT -Value "VERSION=$VERSION"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "RELEASE_TAG=$RELEASE_TAG"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "IS_PRERELEASE=$IS_PRERELEASE"
       - uses: msys2/setup-msys2@v2
         with:
           update: true
@@ -183,14 +466,17 @@ jobs:
           dir .
 
       - name: Release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.12.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ env.VERSION }}
+          tag: ${{ env.RELEASE_TAG }}
+          commit: ${{ github.sha }}
           artifacts: |
             kptools-msys2-win.7z
           allowUpdates: true
           replacesArtifacts: true
+          prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
   Build-on-mac:
     runs-on: macos-latest
@@ -206,8 +492,18 @@ jobs:
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
           VERSION="$MAJOR.$MINOR.$PATCH"
+          if [[ "$GITHUB_REF" == refs/heads/work/* ]]; then
+            RELEASE_TAG="${VERSION}-dev.${GITHUB_RUN_NUMBER}"
+            IS_PRERELEASE=true
+          else
+            RELEASE_TAG="$VERSION"
+            IS_PRERELEASE=false
+          fi
           echo "Generated Version: $VERSION"
+          echo "Release tag: $RELEASE_TAG (prerelease=$IS_PRERELEASE)"
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_OUTPUT
 
       - name: Make hdr
         run: |
@@ -224,14 +520,17 @@ jobs:
           make
           mv kptools kptools-mac
       - name: Release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.parse_version.outputs.VERSION }}
+          tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
+          commit: ${{ github.sha }}
           artifacts: |
             tools/build/kptools-mac
           allowUpdates: true
           replacesArtifacts: true
+          prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
   Build-lkm:
     strategy:
@@ -264,19 +563,31 @@ jobs:
           MINOR=$(grep '#define MINOR' version | awk '{print $3}')
           PATCH=$(grep '#define PATCH' version | awk '{print $3}')
           VERSION="$MAJOR.$MINOR.$PATCH"
+          if [[ "$GITHUB_REF" == refs/heads/work/* ]]; then
+            RELEASE_TAG="${VERSION}-dev.${GITHUB_RUN_NUMBER}"
+            IS_PRERELEASE=true
+          else
+            RELEASE_TAG="$VERSION"
+            IS_PRERELEASE=false
+          fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> $GITHUB_OUTPUT
       - uses: actions/download-artifact@v4
         with:
           pattern: '*-lkm'
           path: lkm-out
           merge-multiple: true
       - name: Release LKM
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.14.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.parse_version.outputs.VERSION }}
+          tag: ${{ steps.parse_version.outputs.RELEASE_TAG }}
+          commit: ${{ github.sha }}
           artifacts: |
             lkm-out/*kernelpatch.ko
           allowUpdates: true
           replacesArtifacts: true
+          prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
