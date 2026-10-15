@@ -917,6 +917,7 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 extern void kp_syscall_4_4_fast_entry(void);
 extern void kp_syscall_4_4_trace_entry(void);
 extern void kp_syscall_4_4_fast_bypass_entry(void);
+extern void kp_syscall_4_4_trace_bypass_entry(void);
 extern void __noreturn kp_syscall_4_4_resume(uintptr_t frame, long ret, uintptr_t target);
 extern void __noreturn kp_syscall_4_4_passthrough_fast(uintptr_t frame);
 extern void __noreturn kp_syscall_4_4_passthrough_trace(uintptr_t frame);
@@ -1504,8 +1505,12 @@ static int syscall_dispatch_4_4_init(void)
 #if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS
     fast_entry_target = (uintptr_t)&kp_syscall_4_4_fast_bypass_entry;
 #endif
+    uintptr_t trace_entry_target = (uintptr_t)&kp_syscall_4_4_trace_entry;
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+    trace_entry_target = (uintptr_t)&kp_syscall_4_4_trace_bypass_entry;
+#endif
     if (!syscall_4_4_make_branch(fast, fast_entry_target, fast_patch) ||
-        !syscall_4_4_make_branch(trace, (uintptr_t)&kp_syscall_4_4_trace_entry, trace_patch)) {
+        !syscall_4_4_make_branch(trace, trace_entry_target, trace_patch)) {
         log_boot("4.4 dispatcher: KP entry outside ADRP range\\n");
         return -ERANGE;
     }
@@ -1597,6 +1602,28 @@ static int syscall_dispatch_4_4_init(void)
              ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2],
              trace_patch[0], trace_patch[1], trace_patch[2]);
     return -EAGAIN;
+#elif KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+    /*
+     * Diagnostic only: intercept the slow/trace-site branch but replay the
+     * original LDR/BLR/STR sequence in assembly. Do not enter the C dispatcher,
+     * change syscall_hook_global, or disable the legacy syscall-table hooks.
+     */
+    int trace_rc = hotpatch(trace_addrs, trace_patch, 3);
+    if (trace_rc) {
+        int rollback_rc = hotpatch(trace_addrs, syscall_4_4_trace_backup, 3);
+        if (rollback_rc) {
+            syscall_4_4_backend_unsafe = 1;
+            log_boot("4.4 dispatcher TRACE-BYPASS: patch rc=%d trace rollback rc=%d; reject syscall hooks\\n",
+                     trace_rc, rollback_rc);
+            return -EIO;
+        }
+        log_boot("4.4 dispatcher TRACE-BYPASS: trace patch rc=%d; original trace site restored\\n",
+                 trace_rc);
+        return trace_rc;
+    }
+    log_boot("4.4 dispatcher TRACE-BYPASS ACTIVE: trace=%llx ret=%llx; assembly replays original LDR/BLR/STR, C dispatcher untouched, global hook disabled, legacy syscall-table hooks retained\\n",
+             trace, kp_syscall_4_4_trace_return);
+    return 0;
 #else
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
