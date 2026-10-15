@@ -1368,19 +1368,19 @@ static int syscall_dispatch_4_4_init(void)
     syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
     /*
-     * Diagnostic mode: keep the table-driven loop but use only one scalar
-     * result. This removes the local result array and indexed result stores,
-     * while retaining repeated lookups through names[i]. No shared stores,
-     * compat probes, string logging, or entry setup are performed.
+     * Diagnostic mode: write only the first three resolutions into the shared
+     * address table using a bounded indexed loop. Do not log unresolved names,
+     * check compat support, or modify entry-site state.
      */
-    uintptr_t wrapper_result = 0;
     for (unsigned int i = 0; i < 3; i++) {
-        wrapper_result =
+        syscall_4_4_special_wrapper_addrs[i] =
             kallsyms_lookup_name(syscall_4_4_special_wrapper_names[i]);
     }
-    log_boot("4.4 dispatcher WRAPPER-TABLE-THREE-LOOP-SCALAR: el0_svc=%llx ret_fast=%llx last_resolved=%llx; scalar result only; use legacy hooks\n",
+    log_boot("4.4 dispatcher WRAPPER-TABLE-THREE-LOOP-GLOBAL-STORE: el0_svc=%llx ret_fast=%llx resolved=%llx/%llx/%llx; first three shared slots only; use legacy hooks\n",
              (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
-             (uint64_t)wrapper_result);
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0],
+             (uint64_t)syscall_4_4_special_wrapper_addrs[1],
+             (uint64_t)syscall_4_4_special_wrapper_addrs[2]);
     return -EAGAIN;
 #endif
 #if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
