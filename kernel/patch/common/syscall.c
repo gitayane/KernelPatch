@@ -1563,8 +1563,8 @@ static int syscall_dispatch_4_4_init(void)
             return test.patch_rc ? test.patch_rc : stop_rc;
         }
 
-        log_boot("4.4 dispatcher PATCH-RESTORE passed: branch encoding/write/restore succeeded; trampoline was never executed\\n");
-        return 0;
+        log_boot("4.4 dispatcher PATCH-RESTORE passed: branch encoding/write/restore succeeded; trampoline was never executed; keep legacy hooks\\n");
+        return -EAGAIN;
     }
 #endif
 
