@@ -39,10 +39,11 @@ kp_syscall_4_4_trace_entry:
     .size kp_syscall_4_4_trace_entry, .-kp_syscall_4_4_trace_entry
 
 /*
- * Trace-site diagnostic bypass. Replay the three overwritten kernel
- * instructions with the original pt_regs stack and argument registers, but
- * do not enter the KP C dispatcher or allocate a private frame. This site is
- * normally reached only after the kernel's syscall-number bounds check.
+ * Unenabled trace-site prototype. Do not activate from syscall.c yet:
+ * a live three-word patch also replaces trace+8, which is a shared continuation
+ * reached by __ni_sys_trace for out-of-range compat/private syscalls. That
+ * incoming edge does not enter at this veneer and would execute BR X16 with a
+ * stale value. A replacement must preserve or redirect that shared continuation.
  */
     .global kp_syscall_4_4_trace_bypass_entry
     .type kp_syscall_4_4_trace_bypass_entry, %function

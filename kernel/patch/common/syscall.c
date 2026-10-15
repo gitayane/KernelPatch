@@ -1644,27 +1644,24 @@ static int syscall_dispatch_4_4_init(void)
     return -EAGAIN;
 #elif KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
     /*
-     * Diagnostic only: intercept the slow/trace-site branch but replay the
-     * original LDR/BLR/STR sequence in assembly. Do not enter the C dispatcher,
-     * change syscall_hook_global, or disable the legacy syscall-table hooks.
+     * DISABLED after the dev.127/dev.133/dev.136 trace-site panics.
+     *
+     * The three-word patch at trace overwrites trace+8 (original STR X0,[SP]).
+     * That address is also the shared return target of __ni_sys_trace: an
+     * out-of-range compat/private syscall branches to __ni_sys_trace before
+     * reaching the trace site, then the native path branches back to trace+8.
+     * It therefore enters the patched BR X16 without setting X16 to our veneer
+     * (dev.136: X16=0x400800, PC=0x400800, LR=__ni_sys_trace+8).
+     *
+     * The veneer-side cmp cannot guard this edge because it never enters at
+     * trace+0. Keep this mode read-only until the shared continuation and every
+     * incoming edge are preserved by a redesigned patch.
      */
-    int trace_rc = hotpatch(trace_addrs, trace_patch, 3);
-    if (trace_rc) {
-        int rollback_rc = hotpatch(trace_addrs, syscall_4_4_trace_backup, 3);
-        if (rollback_rc) {
-            syscall_4_4_backend_unsafe = 1;
-            log_boot("4.4 dispatcher TRACE-BYPASS: patch rc=%d trace rollback rc=%d; reject syscall hooks\\n",
-                     trace_rc, rollback_rc);
-            return -EIO;
-        }
-        log_boot("4.4 dispatcher TRACE-BYPASS: trace patch rc=%d; original trace site restored\\n",
-                 trace_rc);
-        return trace_rc;
-    }
-    log_boot("4.4 dispatcher TRACE-BYPASS ACTIVE: trace=%llx ret=%llx invalid_target=%llx; guarded assembly replay, out-of-range syscall numbers branch to original __ni_sys_trace; C dispatcher untouched, global hook disabled, legacy syscall-table hooks retained\n",
-             trace, kp_syscall_4_4_trace_return,
+    log_boot("4.4 dispatcher TRACE-BYPASS PREFLIGHT ONLY (live patch disabled after dev.136 panic): fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx invalid_target=%llx; trace+8 is shared __ni_sys_trace return target; NO TEXT WRITES, legacy syscall-table hooks retained\n",
+             fast, trace, syscall_4_4_fast_return,
+             kp_syscall_4_4_trace_return,
              kp_syscall_4_4_trace_invalid_target);
-    return 0;
+    return -EAGAIN;
 #else
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
