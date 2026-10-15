@@ -1598,10 +1598,12 @@ static int syscall_dispatch_4_4_init(void)
         return rollback_rc ? rollback_rc : trace_rc;
     }
 
-    syscall_hook_handler_granular = 1;
-    syscall_hook_barrier();
-    syscall_hook_global = 1;
-    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx; TRACE-ONLY diagnostic mode enabled, fast site untouched\n",
+    /*
+     * Keep the legacy per-syscall table-hook backend active. Only the trace
+     * entry is patched here; switching registration to a global callback list
+     * would leave ordinary fast syscalls outside that list.
+     */
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx; TRACE-ONLY diagnostic mode enabled, legacy syscall-table hooks retained and fast site untouched\n",
              fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return);
     return 0;
 #else
@@ -1633,10 +1635,12 @@ static int syscall_dispatch_4_4_init(void)
      * boot-path isolation only; traced syscalls intentionally retain legacy
      * per-syscall behavior and this is not a full-featured runtime mode.
      */
-    syscall_hook_handler_granular = 1;
-    syscall_hook_barrier();
-    syscall_hook_global = 1;
-    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx; FAST-ONLY diagnostic mode enabled, trace site unchanged\n",
+    /*
+     * Keep global hook registration disabled in this diagnostic. APatch and
+     * other consumers continue using the original per-syscall table hooks, so
+     * the untouched trace entry cannot bypass a newly selected global backend.
+     */
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx; FAST-ONLY diagnostic mode enabled, legacy syscall-table hooks retained and trace site unchanged\n",
              fast, trace, syscall_4_4_fast_return);
     return 0;
 #endif
