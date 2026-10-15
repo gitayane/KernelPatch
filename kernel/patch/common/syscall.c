@@ -514,6 +514,22 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "WRAPPER_PREFIX_ONLY is mutually exclusive with other dispatcher diagnostic modes"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "TRACE_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY)
+#error "TRACE_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
 #if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
 typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
 typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
@@ -1568,6 +1584,27 @@ static int syscall_dispatch_4_4_init(void)
     }
 #endif
 
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY
+    /*
+     * Diagnostic mode: patch only the trace/audit handler-selection site and
+     * route it through the C dispatcher. Keep the normal fast entry untouched
+     * to isolate the __sys_trace entry/return path before enabling both sites.
+     */
+    int trace_rc = hotpatch(trace_addrs, trace_patch, 3);
+    if (trace_rc) {
+        int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
+        log_boot("4.4 dispatcher TRACE-ONLY: trace site patch rc=%d rollback rc=%d\n",
+                 trace_rc, rollback_rc);
+        return rollback_rc ? rollback_rc : trace_rc;
+    }
+
+    syscall_hook_handler_granular = 1;
+    syscall_hook_barrier();
+    syscall_hook_global = 1;
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx; TRACE-ONLY diagnostic mode enabled, fast site untouched\n",
+             fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return);
+    return 0;
+#else
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
         int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
@@ -1618,6 +1655,7 @@ static int syscall_dispatch_4_4_init(void)
     log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx, global syscall hook enabled\\n",
              fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return);
     return 0;
+#endif
 }
 
 void syscall_dispatch_init(void)
