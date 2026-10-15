@@ -1640,8 +1640,9 @@ static int syscall_dispatch_4_4_init(void)
      * registrations continue to use the legacy per-syscall hook path. This
      * isolates entry/return control flow from global-dispatcher registration.
      */
-    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx; FAST-BYPASS diagnostic mode active: assembly pass-through bypasses the global C dispatcher; legacy syscall-table hooks remain on the normal handler path\\n",
-             fast, trace, syscall_4_4_fast_return);
+    log_boot("4.4 dispatcher FAST-BYPASS ACTIVE: fast=%llx trace=%llx ret_fast=%llx; trace site untouched orig=%08x/%08x/%08x; assembly pass-through bypasses C dispatcher, global hook disabled, legacy syscall-table hooks retained\\n",
+             fast, trace, syscall_4_4_fast_return,
+             ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
     return 0;
 #endif
 
