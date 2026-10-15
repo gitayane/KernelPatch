@@ -1125,7 +1125,7 @@ static int syscall_4_4_trace_island_prepare(uintptr_t trace, uintptr_t target,
     if (!free_sym) free_sym = kallsyms_lookup_name("vfree");
 
     if (!alloc_sym || !free_sym || !flush_sym) {
-        log_boot("4.4 dispatcher TRACE-ISLAND: symbols missing module_alloc=%llx free=%llx flush_icache_range=%llx; no kernel text writes\\n",
+        log_boot("4.4 dispatcher TRACE-ISLAND: symbols missing module_alloc=%llx free=%llx flush_icache_range=%llx; no kernel text writes\n",
                  (uint64_t)alloc_sym, (uint64_t)free_sym, (uint64_t)flush_sym);
         return -ENOENT;
     }
@@ -1139,14 +1139,14 @@ static int syscall_4_4_trace_island_prepare(uintptr_t trace, uintptr_t target,
 
     void *island = alloc_fn(0x1000);
     if (!island) {
-        log_boot("4.4 dispatcher TRACE-ISLAND: module_alloc(0x1000) failed; no kernel text writes\\n");
+        log_boot("4.4 dispatcher TRACE-ISLAND: module_alloc(0x1000) failed; no kernel text writes\n");
         return -ENOMEM;
     }
 
     uintptr_t addr = (uintptr_t)island;
     if ((addr & 3u) || (trace & 3u) || !target) {
         free_fn(island);
-        log_boot("4.4 dispatcher TRACE-ISLAND: invalid alignment/target trace=%llx island=%llx target=%llx; no kernel text writes\\n",
+        log_boot("4.4 dispatcher TRACE-ISLAND: invalid alignment/target trace=%llx island=%llx target=%llx; no kernel text writes\n",
                  (uint64_t)trace, (uint64_t)addr, (uint64_t)target);
         return -EINVAL;
     }
@@ -1156,7 +1156,7 @@ static int syscall_4_4_trace_island_prepare(uintptr_t trace, uintptr_t target,
         ((uint32_t *)trace)[1] != KP4_SYSCALL_BLR_X16 ||
         ((uint32_t *)trace)[2] != KP4_SYSCALL_STR_X0_SP) {
         free_fn(island);
-        log_boot("4.4 dispatcher TRACE-ISLAND: trace instructions changed; no kernel text writes\\n");
+        log_boot("4.4 dispatcher TRACE-ISLAND: trace instructions changed; no kernel text writes\n");
         return -EAGAIN;
     }
 
@@ -1165,7 +1165,7 @@ static int syscall_4_4_trace_island_prepare(uintptr_t trace, uintptr_t target,
     if (addr >= trace) {
         if (distance > 0x07fffffcu) {
             free_fn(island);
-            log_boot("4.4 dispatcher TRACE-ISLAND: allocated page outside positive B range trace=%llx island=%llx distance=%llx\\n",
+            log_boot("4.4 dispatcher TRACE-ISLAND: allocated page outside positive B range trace=%llx island=%llx distance=%llx\n",
                      (uint64_t)trace, (uint64_t)addr, (uint64_t)distance);
             return -ERANGE;
         }
@@ -1173,7 +1173,7 @@ static int syscall_4_4_trace_island_prepare(uintptr_t trace, uintptr_t target,
     } else {
         if (distance > 0x08000000u) {
             free_fn(island);
-            log_boot("4.4 dispatcher TRACE-ISLAND: allocated page outside negative B range trace=%llx island=%llx distance=%llx\\n",
+            log_boot("4.4 dispatcher TRACE-ISLAND: allocated page outside negative B range trace=%llx island=%llx distance=%llx\n",
                      (uint64_t)trace, (uint64_t)addr, (uint64_t)distance);
             return -ERANGE;
         }
@@ -1181,7 +1181,7 @@ static int syscall_4_4_trace_island_prepare(uintptr_t trace, uintptr_t target,
     }
     if (distance & 3u) {
         free_fn(island);
-        log_boot("4.4 dispatcher TRACE-ISLAND: unaligned branch displacement distance=%llx\\n",
+        log_boot("4.4 dispatcher TRACE-ISLAND: unaligned branch displacement distance=%llx\n",
                  (uint64_t)distance);
         return -EINVAL;
     }
@@ -1208,7 +1208,7 @@ static int syscall_4_4_trace_island_prepare(uintptr_t trace, uintptr_t target,
     *island_out = island;
     *free_out = free_fn;
 
-    log_boot("4.4 dispatcher TRACE-ISLAND PREPARED: trace=%llx island=%llx target=%llx distance=%llx branch=%08x; island=ldr-literal/br/absolute-target; trace+4 and trace+8 preserved; kernel text not patched yet\\n",
+    log_boot("4.4 dispatcher TRACE-ISLAND PREPARED: trace=%llx island=%llx target=%llx distance=%llx branch=%08x; island=ldr-literal/br/absolute-target; trace+4 and trace+8 preserved; kernel text not patched yet\n",
              (uint64_t)trace, (uint64_t)addr, (uint64_t)target,
              (uint64_t)distance, *branch_out);
     return 0;
@@ -1772,10 +1772,10 @@ static int syscall_dispatch_4_4_init(void)
             int rollback_rc = hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
             if (rollback_rc) {
                 syscall_4_4_backend_unsafe = 1;
-                log_boot("4.4 dispatcher TRACE-ISLAND: fast-site patch rc=%d rollback rc=%d; syscall hooks disabled\\n",
+                log_boot("4.4 dispatcher TRACE-ISLAND: fast-site patch rc=%d rollback rc=%d; syscall hooks disabled\n",
                          rc, rollback_rc);
             } else {
-                log_boot("4.4 dispatcher TRACE-ISLAND: fast-site patch rc=%d; original fast site restored\\n", rc);
+                log_boot("4.4 dispatcher TRACE-ISLAND: fast-site patch rc=%d; original fast site restored\n", rc);
             }
             island_free_fn(island);
             return rollback_rc ? -EIO : rc;
@@ -1793,17 +1793,17 @@ static int syscall_dispatch_4_4_init(void)
                 if (trace_restore_rc) {
                     /* A partial trace patch may still branch here: never free it. */
                     syscall_4_4_trace_island = island;
-                    log_boot("4.4 dispatcher TRACE-ISLAND: CRITICAL rollback failed trace=%d fast=%d; retained island=%llx and disabled syscall hooks\\n",
+                    log_boot("4.4 dispatcher TRACE-ISLAND: CRITICAL rollback failed trace=%d fast=%d; retained island=%llx and disabled syscall hooks\n",
                              trace_restore_rc, fast_restore_rc, (uint64_t)island);
                 } else {
                     island_free_fn(island);
-                    log_boot("4.4 dispatcher TRACE-ISLAND: trace restored but fast rollback failed rc=%d; syscall hooks disabled\\n",
+                    log_boot("4.4 dispatcher TRACE-ISLAND: trace restored but fast rollback failed rc=%d; syscall hooks disabled\n",
                              fast_restore_rc);
                 }
                 return -EIO;
             }
             island_free_fn(island);
-            log_boot("4.4 dispatcher TRACE-ISLAND: trace branch patch rc=%d; both original entry paths restored\\n", rc);
+            log_boot("4.4 dispatcher TRACE-ISLAND: trace branch patch rc=%d; both original entry paths restored\n", rc);
             return rc;
         }
 
@@ -1811,7 +1811,7 @@ static int syscall_dispatch_4_4_init(void)
         syscall_hook_handler_granular = 1;
         syscall_hook_barrier();
         syscall_hook_global = 1;
-        log_boot("4.4 dispatcher TRACE-ISLAND ACTIVE: fast=%llx trace=%llx island=%llx target=%llx branch=%08x; trace[1]=%08x trace[2]=%08x unchanged; trace+8 shared return intact; global C-backed syscall dispatcher enabled\\n",
+        log_boot("4.4 dispatcher TRACE-ISLAND ACTIVE: fast=%llx trace=%llx island=%llx target=%llx branch=%08x; trace[1]=%08x trace[2]=%08x unchanged; trace+8 shared return intact; global C-backed syscall dispatcher enabled\n",
                  (uint64_t)fast, (uint64_t)trace, (uint64_t)island,
                  (uint64_t)trace_entry_target, trace_branch,
                  ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
