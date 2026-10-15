@@ -1106,6 +1106,47 @@ static bool syscall_4_4_make_branch(uintptr_t pc, uintptr_t target, uint32_t out
     return true;
 }
 
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+/*
+ * Safe feasibility probe for a future two-word trace-site patch.
+ *
+ * A single B can reach an executable island within +/-128 MiB, letting the
+ * trace site's third instruction (STR X0,[SP]) remain intact for the shared
+ * __ni_sys_trace return edge. This probe only allocates and frees a module
+ * text page; it never writes the page or kernel text and never executes it.
+ */
+static void syscall_4_4_trace_island_preflight(uintptr_t trace)
+{
+    typedef void *(*module_alloc_fn_t)(unsigned long size);
+    typedef void (*module_memfree_fn_t)(void *addr);
+
+    uintptr_t alloc_sym = kallsyms_lookup_name("module_alloc");
+    uintptr_t free_sym = kallsyms_lookup_name("module_memfree");
+    if (!free_sym) free_sym = kallsyms_lookup_name("vfree");
+
+    if (!alloc_sym || !free_sym) {
+        log_boot("4.4 dispatcher TRACE-BYPASS ISLAND-PREFLIGHT: allocator symbols missing module_alloc=%llx module_memfree/vfree=%llx; no allocation attempted\\n",
+                 (uint64_t)alloc_sym, (uint64_t)free_sym);
+        return;
+    }
+
+    void *island = ((module_alloc_fn_t)alloc_sym)(0x1000);
+    if (!island) {
+        log_boot("4.4 dispatcher TRACE-BYPASS ISLAND-PREFLIGHT: module_alloc(0x1000) failed; no text writes\\n");
+        return;
+    }
+
+    uintptr_t addr = (uintptr_t)island;
+    uintptr_t distance = addr >= trace ? addr - trace : trace - addr;
+    int reachable = ((addr & 3u) == 0 && (trace & 3u) == 0 &&
+                     distance < 0x08000000u);
+    log_boot("4.4 dispatcher TRACE-BYPASS ISLAND-PREFLIGHT: trace=%llx island=%llx distance=%llx direct_B_reachable=%d; page will be freed, no writes/no execution\\n",
+             (uint64_t)trace, (uint64_t)addr, (uint64_t)distance, reachable);
+
+    ((module_memfree_fn_t)free_sym)(island);
+}
+#endif
+
 static int syscall_4_4_find_sites(uintptr_t el0_svc, uintptr_t *fast, uintptr_t *trace)
 {
     uintptr_t ret_fast = syscall_4_4_fast_return;
@@ -1657,6 +1698,7 @@ static int syscall_dispatch_4_4_init(void)
      * trace+0. Keep this mode read-only until the shared continuation and every
      * incoming edge are preserved by a redesigned patch.
      */
+    syscall_4_4_trace_island_preflight(trace);
     log_boot("4.4 dispatcher TRACE-BYPASS PREFLIGHT ONLY (live patch disabled after dev.136 panic): fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx invalid_target=%llx; trace+8 is shared __ni_sys_trace return target; NO TEXT WRITES, legacy syscall-table hooks retained\n",
              fast, trace, syscall_4_4_fast_return,
              kp_syscall_4_4_trace_return,
