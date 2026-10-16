@@ -20,6 +20,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Android NDK
+        id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
           ndk-version: r26b
@@ -27,13 +28,17 @@ jobs:
 
       - name: Build native and compat probes
         shell: bash
+        env:
+          NDK_BIN: ${{ steps.setup-ndk.outputs.ndk-path }/toolchains/llvm/prebuilt/linux-x86_64/bin
         run: |
           set -euo pipefail
           mkdir -p out
-          aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror \
+          test -x "$NDK_BIN/aarch64-linux-android24-clang"
+          test -x "$NDK_BIN/armv7a-linux-androideabi24-clang"
+          "$NDK_BIN/aarch64-linux-android24-clang" -O2 -Wall -Wextra -Werror \
             -fPIE -pie tests/syscall_trace_probe.c \
             -o out/syscall_trace_probe_arm64
-          armv7a-linux-androideabi24-clang -O2 -Wall -Wextra -Werror \
+          "$NDK_BIN/armv7a-linux-androideabi24-clang" -O2 -Wall -Wextra -Werror \
             -fPIE -pie tests/syscall_trace_probe.c \
             -o out/syscall_trace_probe_arm32
           file out/syscall_trace_probe_arm64 out/syscall_trace_probe_arm32
