@@ -1,0 +1,50 @@
+name: XZP Linux 4.4 syscall-trace probe
+
+on:
+  push:
+    branches:
+      - 'test/**'
+    paths:
+      - 'tests/syscall_trace_probe.c'
+      - '.github/workflows/xzp-syscall-trace-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-probes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - name: Build native and compat probes
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          aarch64-linux-android24-clang -O2 -Wall -Wextra -Werror \
+            -fPIE -pie tests/syscall_trace_probe.c \
+            -o out/syscall_trace_probe_arm64
+          armv7a-linux-androideabi24-clang -O2 -Wall -Wextra -Werror \
+            -fPIE -pie tests/syscall_trace_probe.c \
+            -o out/syscall_trace_probe_arm32
+          file out/syscall_trace_probe_arm64 out/syscall_trace_probe_arm32
+          sha256sum out/syscall_trace_probe_arm64 out/syscall_trace_probe_arm32 \
+            > out/SHA256SUMS
+          cat out/SHA256SUMS
+
+      - name: Upload probe binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: xzp-syscall-trace-probe
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
