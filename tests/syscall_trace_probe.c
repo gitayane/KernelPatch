@@ -34,13 +34,21 @@
 #define OBSERVED_NR 0x000f0002L
 #define MAX_SYSCALL_STOPS 100000UL
 #define TIMEOUT_SECONDS 30U
+#define EXPECTED_SIGNAL_HANDLERS 3
 
 static volatile sig_atomic_t timeout_expired;
+static volatile sig_atomic_t signal_handler_runs;
 
 static void on_alarm(int signo)
 {
     (void)signo;
     timeout_expired = 1;
+}
+
+static void on_usr1(int signo)
+{
+    if (signo == SIGUSR1)
+        signal_handler_runs++;
 }
 
 static void child_probe(void)
@@ -51,7 +59,16 @@ static void child_probe(void)
     int observed_errno;
     long unsupported_result;
     int unsupported_errno;
+    int raised_signals = 0;
     int ok;
+    struct sigaction sa = {0};
+
+    sa.sa_handler = on_usr1;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, (struct sigaction *)0) == -1) {
+        dprintf(STDERR_FILENO, "PROBE_ERROR sigaction errno=%d\n", errno);
+        _exit(92);
+    }
 
     if (ptrace(PTRACE_TRACEME, 0, (void *)0, (void *)0) == -1) {
         dprintf(STDERR_FILENO, "PROBE_ERROR PTRACE_TRACEME errno=%d\n", errno);
@@ -66,6 +83,21 @@ static void child_probe(void)
     errno = 0;
     pid_result = syscall(SYS_getpid);
     pid_errno = errno;
+
+    /*
+     * Exercise signal delivery and the userspace signal-return trampoline while
+     * ptrace continues to stop at syscall boundaries. Returning from each
+     * handler enters the kernel's rt_sigreturn special-wrapper path.
+     */
+    for (int i = 0; i < EXPECTED_SIGNAL_HANDLERS; i++) {
+        if (raise(SIGUSR1) != 0) {
+            dprintf(STDERR_FILENO,
+                    "PROBE_ERROR raise SIGUSR1 iteration=%d errno=%d\n",
+                    i, errno);
+            _exit(93);
+        }
+        raised_signals++;
+    }
 
     /*
      * Keep all three arguments explicit and zero. On ARM32 compat this is the
@@ -87,7 +119,9 @@ static void child_probe(void)
     unsupported_errno = errno;
 
     ok = (pid_result > 0 && pid_errno == 0) &&
-         (unsupported_result == -1 && unsupported_errno == ENOSYS);
+         (unsupported_result == -1 && unsupported_errno == ENOSYS) &&
+         (raised_signals == EXPECTED_SIGNAL_HANDLERS) &&
+         (signal_handler_runs == EXPECTED_SIGNAL_HANDLERS);
 
 #if defined(__arm__) && !defined(__aarch64__)
     /*
@@ -105,9 +139,11 @@ static void child_probe(void)
 
     dprintf(STDOUT_FILENO,
             "CHILD_RESULT abi=%s getpid=%ld errno=%d "
+            "signals_raised=%d signal_handlers=%d "
             "observed_0xf0002=%ld errno=%d "
             "unimplemented_0x%lx=%ld errno=%d expected=%d\n",
-            PROBE_ABI, pid_result, pid_errno, observed_result, observed_errno,
+            PROBE_ABI, pid_result, pid_errno, raised_signals,
+            (int)signal_handler_runs, observed_result, observed_errno,
             (unsigned long)UNIMPLEMENTED_NR, unsupported_result,
             unsupported_errno, ok);
     _exit(ok ? 0 : 1);
@@ -119,6 +155,7 @@ int main(void)
     int status = 0;
     int options_set = 0;
     unsigned long syscall_stops = 0;
+    unsigned long signal_delivery_stops = 0;
     int exit_code = 2;
 
     signal(SIGALRM, on_alarm);
@@ -177,6 +214,7 @@ int main(void)
             break;
         }
 
+        int signal_to_deliver = 0;
         {
             int sig = WSTOPSIG(status);
 
@@ -210,6 +248,13 @@ int main(void)
                     exit_code = 2;
                     break;
                 }
+            } else if (sig == SIGUSR1) {
+                /*
+                 * Forward the signal at the ptrace delivery stop so the
+                 * handler runs and returns through rt_sigreturn.
+                 */
+                signal_to_deliver = sig;
+                signal_delivery_stops++;
             } else {
                 dprintf(STDERR_FILENO,
                         "PROBE_FAIL unexpected child stop signal=%d\n", sig);
@@ -220,7 +265,8 @@ int main(void)
             }
         }
 
-        if (ptrace(PTRACE_SYSCALL, child, (void *)0, (void *)0) == -1) {
+        if (ptrace(PTRACE_SYSCALL, child, (void *)0,
+                   (void *)(long)signal_to_deliver) == -1) {
             dprintf(STDERR_FILENO, "PROBE_ERROR PTRACE_SYSCALL errno=%d\n",
                     errno);
             kill(child, SIGKILL);
@@ -231,15 +277,18 @@ int main(void)
     }
 
     alarm(0);
-    if (exit_code == 0 && syscall_stops >= 6) {
+    if (exit_code == 0 && syscall_stops >= 6 &&
+        signal_delivery_stops == EXPECTED_SIGNAL_HANDLERS) {
         dprintf(STDOUT_FILENO,
-                "PROBE_PASS abi=%s ptrace_syscall_stops=%lu child_exit=0\n",
-                PROBE_ABI, syscall_stops);
+                "PROBE_PASS abi=%s ptrace_syscall_stops=%lu "
+                "signal_delivery_stops=%lu child_exit=0\n",
+                PROBE_ABI, syscall_stops, signal_delivery_stops);
         return 0;
     }
 
     dprintf(STDERR_FILENO,
-            "PROBE_FAIL abi=%s ptrace_syscall_stops=%lu child_exit=%d\n",
-            PROBE_ABI, syscall_stops, exit_code);
+            "PROBE_FAIL abi=%s ptrace_syscall_stops=%lu "
+            "signal_delivery_stops=%lu child_exit=%d\n",
+            PROBE_ABI, syscall_stops, signal_delivery_stops, exit_code);
     return exit_code == 0 ? 2 : exit_code;
 }
