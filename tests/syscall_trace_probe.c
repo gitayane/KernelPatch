@@ -90,9 +90,15 @@ static void child_probe(void)
          (unsupported_result == -1 && unsupported_errno == ENOSYS);
 
 #if defined(__arm__) && !defined(__aarch64__)
-    /* The compat cacheflush probe can be handled (0) or return ENOSYS. */
+    /*
+     * compat cacheflush is implemented on this kernel. With a zero address
+     * and zero length, it may reject the invalid range with EFAULT; ENOSYS is
+     * also acceptable on kernels that do not expose this private syscall.
+     * The regression condition is that the traced call returns normally.
+     */
     ok = ok && ((observed_result == 0 && observed_errno == 0) ||
-                (observed_result == -1 && observed_errno == ENOSYS));
+                (observed_result == -1 &&
+                 (observed_errno == EFAULT || observed_errno == ENOSYS)));
 #else
     ok = ok && (observed_result == -1 && observed_errno == ENOSYS);
 #endif
