@@ -37,9 +37,14 @@
 #define MAX_SYSCALL_STOPS 100000UL
 #define TIMEOUT_SECONDS 30U
 #define EXPECTED_SIGNAL_HANDLERS 3
+#define EXPECTED_SIGNAL_DELIVERY_STOPS (EXPECTED_SIGNAL_HANDLERS + 1)
 
 static volatile sig_atomic_t timeout_expired;
 static volatile sig_atomic_t signal_handler_runs;
+
+struct restart_state {
+    volatile sig_atomic_t stage;
+};
 
 struct passthrough_result {
     long open_result;
@@ -154,7 +159,7 @@ static void on_usr1(int signo)
         signal_handler_runs++;
 }
 
-static void child_probe(void)
+static void child_probe(int restart_read_fd, struct restart_state *restart)
 {
     long pid_result;
     int pid_errno;
@@ -166,9 +171,14 @@ static void child_probe(void)
     int passthrough_ok;
     struct passthrough_result passthrough = {0};
     int ok;
+    long restart_read_result;
+    int restart_read_errno;
+    int restart_read_ok;
+    char restart_byte = 0;
     struct sigaction sa = {0};
 
     sa.sa_handler = on_usr1;
+    sa.sa_flags = SA_RESTART;
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGUSR1, &sa, (struct sigaction *)0) == -1) {
         dprintf(STDERR_FILENO, "PROBE_ERROR sigaction errno=%d\n", errno);
@@ -207,6 +217,19 @@ static void child_probe(void)
     }
 
     /*
+     * Test a genuinely interrupted blocking syscall. The tracer sends SIGUSR1
+     * after this read has entered the kernel, then supplies one byte after the
+     * signal-delivery stop. SA_RESTART should make read resume and return it.
+     */
+    restart->stage = 1;
+    errno = 0;
+    restart_read_result = (long)read(restart_read_fd, &restart_byte, 1);
+    restart_read_errno = errno;
+    restart->stage = 2;
+    restart_read_ok = (restart_read_result == 1 && restart_read_errno == 0 &&
+                       restart_byte == 'R');
+
+    /*
      * Keep all three arguments explicit and zero. On ARM32 compat this is the
      * zero-length __ARM_NR_compat_cacheflush probe; it cannot flush a non-empty
      * user range. On AArch64 this is simply an out-of-range syscall number.
@@ -227,9 +250,9 @@ static void child_probe(void)
 
     ok = (pid_result > 0 && pid_errno == 0) &&
          (unsupported_result == -1 && unsupported_errno == ENOSYS) &&
-         passthrough_ok &&
+         passthrough_ok && restart_read_ok &&
          (raised_signals == EXPECTED_SIGNAL_HANDLERS) &&
-         (signal_handler_runs == EXPECTED_SIGNAL_HANDLERS);
+         (signal_handler_runs == EXPECTED_SIGNAL_DELIVERY_STOPS);
 
 #if defined(__arm__) && !defined(__aarch64__)
     /*
@@ -251,6 +274,7 @@ static void child_probe(void)
             "close=%ld/%d mmap=%d/%d mprotect_ro=%d/%d "
             "mprotect_rw=%d/%d memory=%d munmap=%d/%d "
             "signals_raised=%d signal_handlers=%d "
+            "restart_read_ok=%d restart_read=%ld/%d restart_byte=%u "
             "observed_0xf0002=%ld errno=%d "
             "unimplemented_0x%lx=%ld errno=%d expected=%d\n",
             PROBE_ABI, pid_result, pid_errno, passthrough_ok,
@@ -263,7 +287,9 @@ static void child_probe(void)
             passthrough.mprotect_rw_result, passthrough.mprotect_rw_errno,
             passthrough.memory_ok, passthrough.munmap_result,
             passthrough.munmap_errno, raised_signals,
-            (int)signal_handler_runs, observed_result, observed_errno,
+            (int)signal_handler_runs, restart_read_ok, restart_read_result,
+            restart_read_errno, (unsigned int)(unsigned char)restart_byte,
+            observed_result, observed_errno,
             (unsigned long)UNIMPLEMENTED_NR, unsupported_result,
             unsupported_errno, ok);
     _exit(ok ? 0 : 1);
@@ -272,6 +298,10 @@ static void child_probe(void)
 int main(void)
 {
     pid_t child;
+    int restart_pipe[2] = {-1, -1};
+    struct restart_state *restart = MAP_FAILED;
+    int read_signal_sent = 0;
+    int restart_byte_written = 0;
     int status = 0;
     int options_set = 0;
     unsigned long syscall_stops = 0;
@@ -279,6 +309,20 @@ int main(void)
     int exit_code = 2;
 
     signal(SIGALRM, on_alarm);
+
+    if (pipe(restart_pipe) == -1) {
+        dprintf(STDERR_FILENO, "PROBE_ERROR pipe errno=%d\n", errno);
+        return 2;
+    }
+    restart = mmap((void *)0, sizeof(*restart), PROT_READ | PROT_WRITE,
+                   MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (restart == MAP_FAILED) {
+        dprintf(STDERR_FILENO, "PROBE_ERROR shared mmap errno=%d\n", errno);
+        close(restart_pipe[0]);
+        close(restart_pipe[1]);
+        return 2;
+    }
+    restart->stage = 0;
     alarm(TIMEOUT_SECONDS);
 
     child = fork();
@@ -286,8 +330,12 @@ int main(void)
         dprintf(STDERR_FILENO, "PROBE_ERROR fork errno=%d\n", errno);
         return 2;
     }
-    if (child == 0)
-        child_probe();
+    if (child == 0) {
+        close(restart_pipe[1]);
+        child_probe(restart_pipe[0], restart);
+    }
+    close(restart_pipe[0]);
+    restart_pipe[0] = -1;
 
     for (;;) {
         pid_t waited;
@@ -335,6 +383,8 @@ int main(void)
         }
 
         int signal_to_deliver = 0;
+        int trigger_read_signal = 0;
+        int deliver_restart_data = 0;
         {
             int sig = WSTOPSIG(status);
 
@@ -360,6 +410,8 @@ int main(void)
                 options_set = 1;
             } else if (sig == (SIGTRAP | 0x80)) {
                 syscall_stops++;
+                if (restart->stage == 1 && !read_signal_sent)
+                    trigger_read_signal = 1;
                 if (syscall_stops > MAX_SYSCALL_STOPS) {
                     dprintf(STDERR_FILENO,
                             "PROBE_FAIL exceeded syscall-stop limit\n");
@@ -375,6 +427,9 @@ int main(void)
                  */
                 signal_to_deliver = sig;
                 signal_delivery_stops++;
+                if (restart->stage == 1 && read_signal_sent &&
+                    !restart_byte_written)
+                    deliver_restart_data = 1;
             } else {
                 dprintf(STDERR_FILENO,
                         "PROBE_FAIL unexpected child stop signal=%d\n", sig);
@@ -394,17 +449,55 @@ int main(void)
             exit_code = 2;
             break;
         }
+
+        if (trigger_read_signal) {
+            /* Give the child time to enter and block in read(2). */
+            usleep(50000);
+            if (kill(child, SIGUSR1) == -1) {
+                dprintf(STDERR_FILENO,
+                        "PROBE_ERROR kill SIGUSR1 errno=%d\n", errno);
+                kill(child, SIGKILL);
+                (void)waitpid(child, &status, 0);
+                exit_code = 2;
+                break;
+            }
+            read_signal_sent = 1;
+        }
+
+        if (deliver_restart_data) {
+            ssize_t written;
+            do {
+                written = write(restart_pipe[1], "R", 1);
+            } while (written == -1 && errno == EINTR);
+            if (written != 1) {
+                dprintf(STDERR_FILENO,
+                        "PROBE_ERROR write restart byte result=%ld errno=%d\n",
+                        (long)written, errno);
+                kill(child, SIGKILL);
+                (void)waitpid(child, &status, 0);
+                exit_code = 2;
+                break;
+            }
+            restart_byte_written = 1;
+            close(restart_pipe[1]);
+            restart_pipe[1] = -1;
+        }
     }
 
     alarm(0);
     if (exit_code == 0 && syscall_stops >= 6 &&
-        signal_delivery_stops == EXPECTED_SIGNAL_HANDLERS) {
+        signal_delivery_stops == EXPECTED_SIGNAL_DELIVERY_STOPS &&
+        read_signal_sent && restart_byte_written && restart->stage == 2) {
         dprintf(STDOUT_FILENO,
                 "PROBE_PASS abi=%s ptrace_syscall_stops=%lu "
                 "signal_delivery_stops=%lu child_exit=0\n",
                 PROBE_ABI, syscall_stops, signal_delivery_stops);
         return 0;
     }
+
+    if (restart_pipe[0] >= 0) close(restart_pipe[0]);
+    if (restart_pipe[1] >= 0) close(restart_pipe[1]);
+    if (restart != MAP_FAILED) munmap(restart, sizeof(*restart));
 
     dprintf(STDERR_FILENO,
             "PROBE_FAIL abi=%s ptrace_syscall_stops=%lu "
