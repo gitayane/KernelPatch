@@ -44,9 +44,11 @@
 #define PARALLEL_TRACE_CHILDREN 3
 #define PARALLEL_TRACE_ITERATIONS 12
 #define PARALLEL_TRACE_MIN_STOPS 100UL
+#define PARALLEL_TRACE_SIGNALS 2
 
 static volatile sig_atomic_t timeout_expired;
 static volatile sig_atomic_t signal_handler_runs;
+static volatile sig_atomic_t traced_signal_handler_runs;
 
 struct restart_state {
     volatile sig_atomic_t stage;
@@ -72,6 +74,7 @@ struct traced_child_state {
     int done;
     int exit_code;
     unsigned long syscall_stops;
+    unsigned long signal_delivery_stops;
 };
 
 struct traced_parallel_result {
@@ -80,6 +83,7 @@ struct traced_parallel_result {
     int children_completed;
     int failures;
     unsigned long syscall_stops;
+    unsigned long signal_delivery_stops;
 };
 
 struct passthrough_result {
@@ -291,16 +295,35 @@ static int exercise_parallel(struct parallel_result *out)
  * PTRACE_TRACEME and is resumed with PTRACE_SYSCALL. The parent services
  * several tracees with waitpid(__WALL), interleaving their syscall stops.
  */
+static void on_traced_usr1(int signo)
+{
+    if (signo == SIGUSR1)
+        traced_signal_handler_runs++;
+}
+
 static void traced_worker_child(void)
 {
     static const char payload = 'P';
     const size_t page_size = 4096;
+    struct sigaction sa = {0};
     int i;
+
+    sa.sa_handler = on_traced_usr1;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGUSR1, &sa, (struct sigaction *)0) == -1)
+        _exit(100);
 
     if (ptrace(PTRACE_TRACEME, 0, (void *)0, (void *)0) == -1)
         _exit(101);
     if (raise(SIGSTOP) != 0)
         _exit(102);
+
+    for (i = 0; i < PARALLEL_TRACE_SIGNALS; i++) {
+        if (raise(SIGUSR1) != 0)
+            _exit(110);
+    }
+    if (traced_signal_handler_runs != PARALLEL_TRACE_SIGNALS)
+        _exit(111);
 
     for (i = 0; i < PARALLEL_TRACE_ITERATIONS; i++) {
         long tid = syscall(SYS_gettid);
@@ -396,6 +419,7 @@ static int exercise_parallel_traced_children(
         {
             struct traced_child_state *state = (struct traced_child_state *)0;
             int sig;
+            int resume_signal = 0;
             for (i = 0; i < out->children_started; i++) {
                 if (children[i].pid == waited) {
                     state = &children[i];
@@ -414,7 +438,8 @@ static int exercise_parallel_traced_children(
                                    WEXITSTATUS(status) :
                                    128 + WTERMSIG(status);
                 if (state->exit_code != 0 ||
-                    state->syscall_stops < PARALLEL_TRACE_MIN_STOPS)
+                    state->syscall_stops < PARALLEL_TRACE_MIN_STOPS ||
+                    state->signal_delivery_stops != PARALLEL_TRACE_SIGNALS)
                     out->failures++;
                 continue;
             }
@@ -449,6 +474,10 @@ static int exercise_parallel_traced_children(
                                  (void *)(long)SIGKILL);
                     continue;
                 }
+            } else if (sig == SIGUSR1) {
+                state->signal_delivery_stops++;
+                out->signal_delivery_stops++;
+                resume_signal = SIGUSR1;
             } else {
                 out->failures++;
                 (void)kill(state->pid, SIGKILL);
@@ -458,7 +487,7 @@ static int exercise_parallel_traced_children(
             }
 
             if (ptrace(PTRACE_SYSCALL, state->pid, (void *)0,
-                       (void *)0) == -1) {
+                       (void *)(long)resume_signal) == -1) {
                 out->failures++;
                 (void)kill(state->pid, SIGKILL);
                 (void)ptrace(PTRACE_CONT, state->pid, (void *)0,
@@ -469,6 +498,8 @@ static int exercise_parallel_traced_children(
 
     out->ok = out->children_started == PARALLEL_TRACE_CHILDREN &&
               out->children_completed == PARALLEL_TRACE_CHILDREN &&
+              out->signal_delivery_stops ==
+                  PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_SIGNALS &&
               out->failures == 0;
     return out->ok;
 }
@@ -865,11 +896,12 @@ int main(void)
                 "PROBE_PASS abi=%s ptrace_syscall_stops=%lu "
                 "signal_delivery_stops=%lu child_exit=0 "
                 "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
-                "multi_trace_failures=%d\n",
+                "multi_trace_signal_stops=%lu multi_trace_failures=%d\n",
                 PROBE_ABI, syscall_stops, signal_delivery_stops,
                 traced_parallel.children_completed,
                 traced_parallel.children_started,
-                traced_parallel.syscall_stops, traced_parallel.failures);
+                traced_parallel.syscall_stops,
+                traced_parallel.signal_delivery_stops, traced_parallel.failures);
         return 0;
     }
 
@@ -881,9 +913,10 @@ int main(void)
             "PROBE_FAIL abi=%s ptrace_syscall_stops=%lu "
             "signal_delivery_stops=%lu child_exit=%d "
             "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
-            "multi_trace_failures=%d\n",
+            "multi_trace_signal_stops=%lu multi_trace_failures=%d\n",
             PROBE_ABI, syscall_stops, signal_delivery_stops, exit_code,
             traced_parallel.children_completed, traced_parallel.children_started,
-            traced_parallel.syscall_stops, traced_parallel.failures);
+            traced_parallel.syscall_stops,
+            traced_parallel.signal_delivery_stops, traced_parallel.failures);
     return exit_code == 0 ? 2 : exit_code;
 }
