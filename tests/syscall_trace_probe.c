@@ -70,11 +70,21 @@ struct parallel_result {
 
 struct traced_child_state {
     pid_t pid;
+    int index;
     int options_set;
     int done;
     int exit_code;
+    int interrupt_signal_sent;
+    int restart_signal_sent;
+    int restart_byte_written;
     unsigned long syscall_stops;
     unsigned long signal_delivery_stops;
+};
+
+struct traced_child_stage {
+    volatile sig_atomic_t stage;
+    volatile sig_atomic_t interrupt_read_ok;
+    volatile sig_atomic_t restart_read_ok;
 };
 
 struct traced_parallel_result {
@@ -82,6 +92,8 @@ struct traced_parallel_result {
     int children_started;
     int children_completed;
     int failures;
+    int interrupt_reads_ok;
+    int restart_reads_ok;
     unsigned long syscall_stops;
     unsigned long signal_delivery_stops;
 };
@@ -301,11 +313,18 @@ static void on_traced_usr1(int signo)
         traced_signal_handler_runs++;
 }
 
-static void traced_worker_child(void)
+static void traced_worker_child(int restart_read_fd,
+                                  struct traced_child_stage *stage)
 {
     static const char payload = 'P';
     const size_t page_size = 4096;
     struct sigaction sa = {0};
+    long interrupt_result;
+    int interrupt_errno;
+    long restart_result;
+    int restart_errno;
+    char interrupt_byte = 0;
+    char restart_byte = 0;
     int i;
 
     sa.sa_handler = on_traced_usr1;
@@ -324,6 +343,33 @@ static void traced_worker_child(void)
     }
     if (traced_signal_handler_runs != PARALLEL_TRACE_SIGNALS)
         _exit(111);
+
+    /* Without SA_RESTART, a traced signal must interrupt the blocked read. */
+    stage->stage = 1;
+    errno = 0;
+    interrupt_result = (long)read(restart_read_fd, &interrupt_byte, 1);
+    interrupt_errno = errno;
+    stage->interrupt_read_ok =
+        (interrupt_result == -1 && interrupt_errno == EINTR);
+    stage->stage = 2;
+
+    /* With SA_RESTART, the second blocked read must resume after the handler. */
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGUSR1, &sa, (struct sigaction *)0) == -1)
+        _exit(112);
+    stage->stage = 3;
+    errno = 0;
+    restart_result = (long)read(restart_read_fd, &restart_byte, 1);
+    restart_errno = errno;
+    stage->restart_read_ok =
+        (restart_result == 1 && restart_errno == 0 && restart_byte == 'R');
+    stage->stage = 4;
+    if (close(restart_read_fd) != 0)
+        _exit(113);
+    if (!stage->interrupt_read_ok || !stage->restart_read_ok)
+        _exit(114);
+    if (traced_signal_handler_runs != PARALLEL_TRACE_SIGNALS + 2)
+        _exit(115);
 
     for (i = 0; i < PARALLEL_TRACE_ITERATIONS; i++) {
         long tid = syscall(SYS_gettid);
@@ -371,18 +417,53 @@ static int exercise_parallel_traced_children(
     struct traced_parallel_result *out)
 {
     struct traced_child_state children[PARALLEL_TRACE_CHILDREN] = {{0}};
+    int restart_pipes[PARALLEL_TRACE_CHILDREN][2];
+    struct traced_child_stage *stages;
     int i;
+    int j;
+
+    for (i = 0; i < PARALLEL_TRACE_CHILDREN; i++) {
+        restart_pipes[i][0] = -1;
+        restart_pipes[i][1] = -1;
+    }
+    stages = mmap((void *)0,
+                  sizeof(*stages) * PARALLEL_TRACE_CHILDREN,
+                  PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (stages == MAP_FAILED) {
+        out->failures++;
+        return 0;
+    }
+    for (i = 0; i < PARALLEL_TRACE_CHILDREN; i++) {
+        if (pipe(restart_pipes[i]) == -1) {
+            out->failures++;
+            goto cleanup;
+        }
+    }
 
     for (i = 0; i < PARALLEL_TRACE_CHILDREN; i++) {
         pid_t pid = fork();
-        if (pid == 0)
-            traced_worker_child();
+        if (pid == 0) {
+            for (j = 0; j < PARALLEL_TRACE_CHILDREN; j++) {
+                if (j != i && restart_pipes[j][0] >= 0)
+                    close(restart_pipes[j][0]);
+                if (restart_pipes[j][1] >= 0)
+                    close(restart_pipes[j][1]);
+            }
+            traced_worker_child(restart_pipes[i][0], &stages[i]);
+        }
         if (pid < 0) {
             out->failures++;
             break;
         }
         children[i].pid = pid;
+        children[i].index = i;
         out->children_started++;
+    }
+    for (i = 0; i < PARALLEL_TRACE_CHILDREN; i++) {
+        if (restart_pipes[i][0] >= 0) {
+            close(restart_pipes[i][0]);
+            restart_pipes[i][0] = -1;
+        }
     }
 
     while (out->children_completed < out->children_started) {
@@ -420,6 +501,8 @@ static int exercise_parallel_traced_children(
             struct traced_child_state *state = (struct traced_child_state *)0;
             int sig;
             int resume_signal = 0;
+            int trigger_read_signal = 0;
+            int trigger_read_stage = 0;
             for (i = 0; i < out->children_started; i++) {
                 if (children[i].pid == waited) {
                     state = &children[i];
@@ -439,8 +522,19 @@ static int exercise_parallel_traced_children(
                                    128 + WTERMSIG(status);
                 if (state->exit_code != 0 ||
                     state->syscall_stops < PARALLEL_TRACE_MIN_STOPS ||
-                    state->signal_delivery_stops != PARALLEL_TRACE_SIGNALS)
+                    state->signal_delivery_stops != PARALLEL_TRACE_SIGNALS + 2 ||
+                    stages[state->index].stage != 4 ||
+                    !stages[state->index].interrupt_read_ok ||
+                    !stages[state->index].restart_read_ok)
                     out->failures++;
+                if (stages[state->index].interrupt_read_ok)
+                    out->interrupt_reads_ok++;
+                if (stages[state->index].restart_read_ok)
+                    out->restart_reads_ok++;
+                if (restart_pipes[state->index][1] >= 0) {
+                    close(restart_pipes[state->index][1]);
+                    restart_pipes[state->index][1] = -1;
+                }
                 continue;
             }
 
@@ -467,6 +561,15 @@ static int exercise_parallel_traced_children(
             } else if (sig == (SIGTRAP | 0x80)) {
                 state->syscall_stops++;
                 out->syscall_stops++;
+                if (stages[state->index].stage == 1 &&
+                    !state->interrupt_signal_sent) {
+                    trigger_read_signal = 1;
+                    trigger_read_stage = 1;
+                } else if (stages[state->index].stage == 3 &&
+                           !state->restart_signal_sent) {
+                    trigger_read_signal = 1;
+                    trigger_read_stage = 3;
+                }
                 if (out->syscall_stops > MAX_SYSCALL_STOPS) {
                     out->failures++;
                     (void)kill(state->pid, SIGKILL);
@@ -478,6 +581,23 @@ static int exercise_parallel_traced_children(
                 state->signal_delivery_stops++;
                 out->signal_delivery_stops++;
                 resume_signal = SIGUSR1;
+                if (stages[state->index].stage == 3 &&
+                    !state->restart_byte_written) {
+                    ssize_t written;
+                    do {
+                        written = write(restart_pipes[state->index][1], "R", 1);
+                    } while (written == -1 && errno == EINTR);
+                    if (written != 1) {
+                        out->failures++;
+                        (void)kill(state->pid, SIGKILL);
+                        (void)ptrace(PTRACE_CONT, state->pid, (void *)0,
+                                     (void *)(long)SIGKILL);
+                        continue;
+                    }
+                    state->restart_byte_written = 1;
+                    close(restart_pipes[state->index][1]);
+                    restart_pipes[state->index][1] = -1;
+                }
             } else {
                 out->failures++;
                 (void)kill(state->pid, SIGKILL);
@@ -492,15 +612,37 @@ static int exercise_parallel_traced_children(
                 (void)kill(state->pid, SIGKILL);
                 (void)ptrace(PTRACE_CONT, state->pid, (void *)0,
                              (void *)(long)SIGKILL);
+            } else if (trigger_read_signal) {
+                usleep(50000);
+                if (kill(state->pid, SIGUSR1) == -1) {
+                    out->failures++;
+                    (void)kill(state->pid, SIGKILL);
+                    (void)ptrace(PTRACE_CONT, state->pid, (void *)0,
+                                 (void *)(long)SIGKILL);
+                } else if (trigger_read_stage == 1) {
+                    state->interrupt_signal_sent = 1;
+                } else if (trigger_read_stage == 3) {
+                    state->restart_signal_sent = 1;
+                }
             }
         }
     }
 
     out->ok = out->children_started == PARALLEL_TRACE_CHILDREN &&
               out->children_completed == PARALLEL_TRACE_CHILDREN &&
+              out->interrupt_reads_ok == PARALLEL_TRACE_CHILDREN &&
+              out->restart_reads_ok == PARALLEL_TRACE_CHILDREN &&
               out->signal_delivery_stops ==
-                  PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_SIGNALS &&
+                  PARALLEL_TRACE_CHILDREN * (PARALLEL_TRACE_SIGNALS + 2) &&
               out->failures == 0;
+cleanup:
+    for (i = 0; i < PARALLEL_TRACE_CHILDREN; i++) {
+        if (restart_pipes[i][0] >= 0)
+            close(restart_pipes[i][0]);
+        if (restart_pipes[i][1] >= 0)
+            close(restart_pipes[i][1]);
+    }
+    munmap(stages, sizeof(*stages) * PARALLEL_TRACE_CHILDREN);
     return out->ok;
 }
 
@@ -896,12 +1038,16 @@ int main(void)
                 "PROBE_PASS abi=%s ptrace_syscall_stops=%lu "
                 "signal_delivery_stops=%lu child_exit=0 "
                 "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
-                "multi_trace_signal_stops=%lu multi_trace_failures=%d\n",
+                "multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
+                "multi_trace_restart_reads=%d/%d multi_trace_failures=%d\n",
                 PROBE_ABI, syscall_stops, signal_delivery_stops,
                 traced_parallel.children_completed,
                 traced_parallel.children_started,
                 traced_parallel.syscall_stops,
-                traced_parallel.signal_delivery_stops, traced_parallel.failures);
+                traced_parallel.signal_delivery_stops,
+                traced_parallel.interrupt_reads_ok, PARALLEL_TRACE_CHILDREN,
+                traced_parallel.restart_reads_ok, PARALLEL_TRACE_CHILDREN,
+                traced_parallel.failures);
         return 0;
     }
 
@@ -913,10 +1059,14 @@ int main(void)
             "PROBE_FAIL abi=%s ptrace_syscall_stops=%lu "
             "signal_delivery_stops=%lu child_exit=%d "
             "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
-            "multi_trace_signal_stops=%lu multi_trace_failures=%d\n",
+            "multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
+                "multi_trace_restart_reads=%d/%d multi_trace_failures=%d\n",
             PROBE_ABI, syscall_stops, signal_delivery_stops, exit_code,
             traced_parallel.children_completed, traced_parallel.children_started,
             traced_parallel.syscall_stops,
-            traced_parallel.signal_delivery_stops, traced_parallel.failures);
+            traced_parallel.signal_delivery_stops,
+            traced_parallel.interrupt_reads_ok, PARALLEL_TRACE_CHILDREN,
+            traced_parallel.restart_reads_ok, PARALLEL_TRACE_CHILDREN,
+            traced_parallel.failures);
     return exit_code == 0 ? 2 : exit_code;
 }
