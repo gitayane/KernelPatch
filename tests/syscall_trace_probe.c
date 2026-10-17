@@ -74,6 +74,7 @@ struct parallel_result {
 struct traced_child_state {
     pid_t pid;
     int index;
+    int is_fork_child;
     int options_set;
     int done;
     int exit_code;
@@ -99,6 +100,10 @@ struct traced_parallel_result {
     int interrupt_reads_ok;
     int restart_reads_ok;
     int exec_events;
+    int fork_events;
+    int fork_children_started;
+    int fork_children_completed;
+    unsigned long fork_child_syscall_stops;
     unsigned long syscall_stops;
     unsigned long signal_delivery_stops;
 };
@@ -328,6 +333,8 @@ static int traced_exec_child_main(void)
     char byte = 0;
     void *mapping;
     volatile uint32_t *word;
+    pid_t fork_child;
+    int fork_status = 0;
 
     if (pid <= 0 || tid <= 0)
         return 121;
@@ -352,8 +359,51 @@ static int traced_exec_child_main(void)
     if (munmap(mapping, page_size) != 0)
         return 126;
 
+    fork_child = fork();
+    if (fork_child < 0)
+        return 127;
+    if (fork_child == 0) {
+        static const char child_payload = 'F';
+        int child_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        char child_byte = 0;
+        void *child_mapping;
+        volatile uint32_t *child_word;
+
+        if (syscall(SYS_getpid) <= 0 || syscall(SYS_gettid) <= 0)
+            _exit(131);
+        if (child_fd < 0)
+            _exit(132);
+        if (write(child_fd, &child_payload, 1) != 1 ||
+            read(child_fd, &child_byte, 1) != 0 || close(child_fd) != 0)
+            _exit(133);
+        child_mapping = mmap((void *)0, page_size, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (child_mapping == MAP_FAILED)
+            _exit(134);
+        child_word = (volatile uint32_t *)child_mapping;
+        *child_word = 0x464f524bu;
+        if (mprotect(child_mapping, page_size, PROT_READ) != 0 ||
+            *child_word != 0x464f524bu ||
+            munmap(child_mapping, page_size) != 0)
+            _exit(135);
+        dprintf(STDOUT_FILENO,
+                "TRACED_FORK_CHILD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1\n",
+                PROBE_ABI, syscall(SYS_getpid), syscall(SYS_gettid));
+        _exit(0);
+    }
+
+    {
+        pid_t waited;
+        do {
+            waited = waitpid(fork_child, &fork_status, 0);
+        } while (waited < 0 && errno == EINTR);
+        if (waited != fork_child || !WIFEXITED(fork_status) ||
+            WEXITSTATUS(fork_status) != 0)
+            return 128;
+    }
+
     dprintf(STDOUT_FILENO,
-            "TRACED_EXEC_CHILD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1\n",
+            "TRACED_EXEC_CHILD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1 fork_child=1\n",
             PROBE_ABI, pid, tid);
     return 0;
 }
@@ -471,7 +521,8 @@ static void traced_worker_child(int restart_read_fd,
 static int exercise_parallel_traced_children(
     struct traced_parallel_result *out)
 {
-    struct traced_child_state children[PARALLEL_TRACE_CHILDREN] = {{0}};
+    struct traced_child_state children[PARALLEL_TRACE_CHILDREN * 2] = {{0}};
+    int tracee_count = 0;
     int restart_pipes[PARALLEL_TRACE_CHILDREN][2];
     struct traced_child_stage *stages;
     int i;
@@ -512,6 +563,8 @@ static int exercise_parallel_traced_children(
         }
         children[i].pid = pid;
         children[i].index = i;
+        children[i].is_fork_child = 0;
+        tracee_count++;
         out->children_started++;
     }
     for (i = 0; i < PARALLEL_TRACE_CHILDREN; i++) {
@@ -521,7 +574,8 @@ static int exercise_parallel_traced_children(
         }
     }
 
-    while (out->children_completed < out->children_started) {
+    while (out->children_completed < out->children_started ||
+           out->fork_children_completed < out->fork_children_started) {
         int status = 0;
         pid_t waited;
 
@@ -558,7 +612,7 @@ static int exercise_parallel_traced_children(
             int resume_signal = 0;
             int trigger_read_signal = 0;
             int trigger_read_stage = 0;
-            for (i = 0; i < out->children_started; i++) {
+            for (i = 0; i < tracee_count; i++) {
                 if (children[i].pid == waited) {
                     state = &children[i];
                     break;
@@ -575,23 +629,31 @@ static int exercise_parallel_traced_children(
                 state->exit_code = WIFEXITED(status) ?
                                    WEXITSTATUS(status) :
                                    128 + WTERMSIG(status);
-                if (state->exit_code != 0 ||
-                    state->syscall_stops < PARALLEL_TRACE_MIN_STOPS ||
-                    state->signal_delivery_stops != PARALLEL_TRACE_SIGNALS + 2 ||
-                    state->exec_events != 1 ||
-                    stages[state->index].stage != 4 ||
-                    !stages[state->index].interrupt_read_ok ||
-                    !stages[state->index].restart_read_ok)
-                    out->failures++;
-                if (stages[state->index].interrupt_read_ok)
-                    out->interrupt_reads_ok++;
-                if (stages[state->index].restart_read_ok)
-                    out->restart_reads_ok++;
-                if (state->exec_events == 1)
-                    out->exec_events++;
-                if (restart_pipes[state->index][1] >= 0) {
-                    close(restart_pipes[state->index][1]);
-                    restart_pipes[state->index][1] = -1;
+                if (state->is_fork_child) {
+                    if (state->exit_code != 0 ||
+                        state->syscall_stops < 12)
+                        out->failures++;
+                    out->fork_children_completed++;
+                    out->fork_child_syscall_stops += state->syscall_stops;
+                } else {
+                    if (state->exit_code != 0 ||
+                        state->syscall_stops < PARALLEL_TRACE_MIN_STOPS ||
+                        state->signal_delivery_stops != PARALLEL_TRACE_SIGNALS + 2 ||
+                        state->exec_events != 1 ||
+                        stages[state->index].stage != 4 ||
+                        !stages[state->index].interrupt_read_ok ||
+                        !stages[state->index].restart_read_ok)
+                        out->failures++;
+                    if (stages[state->index].interrupt_read_ok)
+                        out->interrupt_reads_ok++;
+                    if (stages[state->index].restart_read_ok)
+                        out->restart_reads_ok++;
+                    if (state->exec_events == 1)
+                        out->exec_events++;
+                    if (restart_pipes[state->index][1] >= 0) {
+                        close(restart_pipes[state->index][1]);
+                        restart_pipes[state->index][1] = -1;
+                    }
                 }
                 continue;
             }
@@ -608,7 +670,7 @@ static int exercise_parallel_traced_children(
             if (!state->options_set) {
                 if (sig != SIGSTOP ||
                     ptrace(PTRACE_SETOPTIONS, state->pid, (void *)0,
-                           (void *)(long)(PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC)) == -1) {
+                           (void *)(long)(PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEFORK)) == -1) {
                     out->failures++;
                     (void)kill(state->pid, SIGKILL);
                     (void)ptrace(PTRACE_CONT, state->pid, (void *)0,
@@ -616,6 +678,25 @@ static int exercise_parallel_traced_children(
                     continue;
                 }
                 state->options_set = 1;
+            } else if (sig == SIGTRAP &&
+                       ((unsigned int)status >> 16) == PTRACE_EVENT_FORK) {
+                unsigned long new_pid = 0;
+                if (tracee_count >= PARALLEL_TRACE_CHILDREN * 2 ||
+                    ptrace(PTRACE_GETEVENTMSG, state->pid, (void *)0,
+                           &new_pid) == -1 || new_pid == 0) {
+                    out->failures++;
+                    (void)kill(state->pid, SIGKILL);
+                    (void)ptrace(PTRACE_CONT, state->pid, (void *)0,
+                                 (void *)(long)SIGKILL);
+                    continue;
+                }
+                children[tracee_count].pid = (pid_t)new_pid;
+                children[tracee_count].index = state->index;
+                children[tracee_count].is_fork_child = 1;
+                children[tracee_count].options_set = 0;
+                tracee_count++;
+                out->fork_events++;
+                out->fork_children_started++;
             } else if (sig == SIGTRAP &&
                        ((unsigned int)status >> 16) == PTRACE_EVENT_EXEC) {
                 state->exec_events++;
@@ -694,6 +775,9 @@ static int exercise_parallel_traced_children(
               out->interrupt_reads_ok == PARALLEL_TRACE_CHILDREN &&
               out->restart_reads_ok == PARALLEL_TRACE_CHILDREN &&
               out->exec_events == PARALLEL_TRACE_CHILDREN &&
+              out->fork_events == PARALLEL_TRACE_CHILDREN &&
+              out->fork_children_started == PARALLEL_TRACE_CHILDREN &&
+              out->fork_children_completed == PARALLEL_TRACE_CHILDREN &&
               out->signal_delivery_stops ==
                   PARALLEL_TRACE_CHILDREN * (PARALLEL_TRACE_SIGNALS + 2) &&
               out->failures == 0;
@@ -1102,7 +1186,8 @@ int main(int argc, char **argv)
                 "PROBE_PASS abi=%s ptrace_syscall_stops=%lu "
                 "signal_delivery_stops=%lu child_exit=0 "
                 "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
-                "multi_trace_exec_events=%d/%d "
+                "multi_trace_exec_events=%d/%d multi_trace_fork_events=%d "
+                "multi_trace_fork_children=%d/%d fork_child_syscall_stops=%lu "
                 "multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
                 "multi_trace_restart_reads=%d/%d multi_trace_failures=%d\n",
                 PROBE_ABI, syscall_stops, signal_delivery_stops,
@@ -1110,6 +1195,10 @@ int main(int argc, char **argv)
                 traced_parallel.children_started,
                 traced_parallel.syscall_stops,
                 traced_parallel.exec_events, PARALLEL_TRACE_CHILDREN,
+                traced_parallel.fork_events,
+                traced_parallel.fork_children_completed,
+                traced_parallel.fork_children_started,
+                traced_parallel.fork_child_syscall_stops,
                 traced_parallel.signal_delivery_stops,
                 traced_parallel.interrupt_reads_ok, PARALLEL_TRACE_CHILDREN,
                 traced_parallel.restart_reads_ok, PARALLEL_TRACE_CHILDREN,
@@ -1125,13 +1214,18 @@ int main(int argc, char **argv)
             "PROBE_FAIL abi=%s ptrace_syscall_stops=%lu "
             "signal_delivery_stops=%lu child_exit=%d "
             "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
-            "multi_trace_exec_events=%d/%d "
+            "multi_trace_exec_events=%d/%d multi_trace_fork_events=%d "
+            "multi_trace_fork_children=%d/%d fork_child_syscall_stops=%lu "
             "multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
                 "multi_trace_restart_reads=%d/%d multi_trace_failures=%d\n",
             PROBE_ABI, syscall_stops, signal_delivery_stops, exit_code,
             traced_parallel.children_completed, traced_parallel.children_started,
             traced_parallel.syscall_stops,
             traced_parallel.exec_events, PARALLEL_TRACE_CHILDREN,
+            traced_parallel.fork_events,
+            traced_parallel.fork_children_completed,
+            traced_parallel.fork_children_started,
+            traced_parallel.fork_child_syscall_stops,
             traced_parallel.signal_delivery_stops,
             traced_parallel.interrupt_reads_ok, PARALLEL_TRACE_CHILDREN,
             traced_parallel.restart_reads_ok, PARALLEL_TRACE_CHILDREN,
