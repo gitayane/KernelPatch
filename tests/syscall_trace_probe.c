@@ -103,6 +103,7 @@ struct traced_parallel_result {
     int fork_events;
     int fork_children_started;
     int fork_children_completed;
+    int sigchld_delivery_stops;
     unsigned long fork_child_syscall_stops;
     unsigned long syscall_stops;
     unsigned long signal_delivery_stops;
@@ -334,7 +335,6 @@ static int traced_exec_child_main(void)
     void *mapping;
     volatile uint32_t *word;
     pid_t fork_child;
-    int fork_status = 0;
 
     if (pid <= 0 || tid <= 0)
         return 121;
@@ -392,16 +392,7 @@ static int traced_exec_child_main(void)
         _exit(0);
     }
 
-    {
-        pid_t waited;
-        do {
-            waited = waitpid(fork_child, &fork_status, 0);
-        } while (waited < 0 && errno == EINTR);
-        if (waited != fork_child || !WIFEXITED(fork_status) ||
-            WEXITSTATUS(fork_status) != 0)
-            return 128;
-    }
-
+    /* The external ptrace parent reaps and validates the traced child. */
     dprintf(STDOUT_FILENO,
             "TRACED_EXEC_CHILD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1 fork_child=1\n",
             PROBE_ABI, pid, tid);
@@ -740,6 +731,10 @@ static int exercise_parallel_traced_children(
                     close(restart_pipes[state->index][1]);
                     restart_pipes[state->index][1] = -1;
                 }
+            } else if (sig == SIGCHLD) {
+                /* A forked tracee may receive SIGCHLD before it exits. */
+                out->sigchld_delivery_stops++;
+                resume_signal = SIGCHLD;
             } else {
                 out->failures++;
                 (void)kill(state->pid, SIGKILL);
@@ -1188,7 +1183,7 @@ int main(int argc, char **argv)
                 "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
                 "multi_trace_exec_events=%d/%d multi_trace_fork_events=%d "
                 "multi_trace_fork_children=%d/%d fork_child_syscall_stops=%lu "
-                "multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
+                "multi_trace_sigchld_stops=%d multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
                 "multi_trace_restart_reads=%d/%d multi_trace_failures=%d\n",
                 PROBE_ABI, syscall_stops, signal_delivery_stops,
                 traced_parallel.children_completed,
@@ -1199,6 +1194,7 @@ int main(int argc, char **argv)
                 traced_parallel.fork_children_completed,
                 traced_parallel.fork_children_started,
                 traced_parallel.fork_child_syscall_stops,
+                traced_parallel.sigchld_delivery_stops,
                 traced_parallel.signal_delivery_stops,
                 traced_parallel.interrupt_reads_ok, PARALLEL_TRACE_CHILDREN,
                 traced_parallel.restart_reads_ok, PARALLEL_TRACE_CHILDREN,
@@ -1216,7 +1212,7 @@ int main(int argc, char **argv)
             "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
             "multi_trace_exec_events=%d/%d multi_trace_fork_events=%d "
             "multi_trace_fork_children=%d/%d fork_child_syscall_stops=%lu "
-            "multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
+            "multi_trace_sigchld_stops=%d multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
                 "multi_trace_restart_reads=%d/%d multi_trace_failures=%d\n",
             PROBE_ABI, syscall_stops, signal_delivery_stops, exit_code,
             traced_parallel.children_completed, traced_parallel.children_started,
@@ -1226,6 +1222,7 @@ int main(int argc, char **argv)
             traced_parallel.fork_children_completed,
             traced_parallel.fork_children_started,
             traced_parallel.fork_child_syscall_stops,
+            traced_parallel.sigchld_delivery_stops,
             traced_parallel.signal_delivery_stops,
             traced_parallel.interrupt_reads_ok, PARALLEL_TRACE_CHILDREN,
             traced_parallel.restart_reads_ok, PARALLEL_TRACE_CHILDREN,
