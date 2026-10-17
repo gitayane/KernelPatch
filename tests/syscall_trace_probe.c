@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -38,12 +39,28 @@
 #define TIMEOUT_SECONDS 30U
 #define EXPECTED_SIGNAL_HANDLERS 3
 #define EXPECTED_SIGNAL_DELIVERY_STOPS (EXPECTED_SIGNAL_HANDLERS + 2)
+#define PARALLEL_THREADS 4
+#define PARALLEL_ITERATIONS 24
 
 static volatile sig_atomic_t timeout_expired;
 static volatile sig_atomic_t signal_handler_runs;
 
 struct restart_state {
     volatile sig_atomic_t stage;
+};
+
+struct parallel_worker {
+    int index;
+    int completed;
+    int failed;
+};
+
+struct parallel_result {
+    int ok;
+    int threads_started;
+    int threads_joined;
+    int iterations_completed;
+    int failures;
 };
 
 struct passthrough_result {
@@ -147,6 +164,109 @@ static int exercise_passthrough(struct passthrough_result *out)
     return ok && out->memory_ok;
 }
 
+/*
+ * Run independent syscall workloads concurrently in worker threads while the
+ * process leader remains under PTRACE_SYSCALL. The workers are intentionally
+ * not individually ptrace-attached: this exercises normal entry dispatch
+ * under task concurrency, while the leader continues to exercise the traced
+ * slow path. Any worker-local error makes the aggregate check fail.
+ */
+static void *parallel_worker_main(void *opaque)
+{
+    struct parallel_worker *worker = (struct parallel_worker *)opaque;
+    static const char payload = 'T';
+    const size_t page_size = 4096;
+    int i;
+
+    for (i = 0; i < PARALLEL_ITERATIONS; i++) {
+        int fd = -1;
+        void *mapping = MAP_FAILED;
+        volatile uint32_t *word;
+        uint32_t value = 0x51000000u |
+                         ((uint32_t)(worker->index + 1) << 8) |
+                         (uint32_t)(i + 1);
+
+        if (syscall(SYS_gettid) <= 0 || syscall(SYS_getpid) != getpid()) {
+            worker->failed = 1;
+            break;
+        }
+
+        fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (fd < 0) {
+            worker->failed = 1;
+            break;
+        }
+        if (write(fd, &payload, 1) != 1) worker->failed = 1;
+        {
+            char byte = 0;
+            if (read(fd, &byte, 1) != 0) worker->failed = 1;
+        }
+        if (close(fd) != 0) worker->failed = 1;
+        if (worker->failed) break;
+
+        mapping = mmap((void *)0, page_size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mapping == MAP_FAILED) {
+            worker->failed = 1;
+            break;
+        }
+        word = (volatile uint32_t *)mapping;
+        *word = value;
+        if (mprotect(mapping, page_size, PROT_READ) != 0 ||
+            *word != value) {
+            worker->failed = 1;
+        }
+        if (mprotect(mapping, page_size, PROT_READ | PROT_WRITE) != 0) {
+            worker->failed = 1;
+        } else {
+            *word = ~value;
+            if (*word != ~value) worker->failed = 1;
+        }
+        if (munmap(mapping, page_size) != 0) worker->failed = 1;
+        if (worker->failed) break;
+
+        worker->completed++;
+    }
+
+    return (void *)0;
+}
+
+static int exercise_parallel(struct parallel_result *out)
+{
+    pthread_t threads[PARALLEL_THREADS];
+    struct parallel_worker workers[PARALLEL_THREADS] = {{0}};
+    int i;
+    int create_failed = 0;
+
+    for (i = 0; i < PARALLEL_THREADS; i++) {
+        workers[i].index = i;
+        if (pthread_create(&threads[i], (const pthread_attr_t *)0,
+                           parallel_worker_main, &workers[i]) != 0) {
+            create_failed = 1;
+            break;
+        }
+        out->threads_started++;
+    }
+
+    for (i = 0; i < out->threads_started; i++) {
+        if (pthread_join(threads[i], (void **)0) == 0) {
+            out->threads_joined++;
+        } else {
+            create_failed = 1;
+        }
+        out->iterations_completed += workers[i].completed;
+        if (workers[i].failed) out->failures++;
+    }
+
+    out->ok = !create_failed &&
+              out->threads_started == PARALLEL_THREADS &&
+              out->threads_joined == PARALLEL_THREADS &&
+              out->iterations_completed ==
+                  PARALLEL_THREADS * PARALLEL_ITERATIONS &&
+              out->failures == 0;
+    return out->ok;
+}
+
 static void on_alarm(int signo)
 {
     (void)signo;
@@ -169,7 +289,9 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
     int unsupported_errno;
     int raised_signals = 0;
     int passthrough_ok;
+    int parallel_ok;
     struct passthrough_result passthrough = {0};
+    struct parallel_result parallel = {0};
     int ok;
     long interrupted_read_result;
     int interrupted_read_errno;
@@ -204,6 +326,7 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
     pid_errno = errno;
 
     passthrough_ok = exercise_passthrough(&passthrough);
+    parallel_ok = exercise_parallel(&parallel);
 
     /*
      * Exercise signal delivery and the userspace signal-return trampoline while
@@ -269,7 +392,7 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
 
     ok = (pid_result > 0 && pid_errno == 0) &&
          (unsupported_result == -1 && unsupported_errno == ENOSYS) &&
-         passthrough_ok && interrupted_read_ok && restart_read_ok &&
+         passthrough_ok && parallel_ok && interrupted_read_ok && restart_read_ok &&
          (raised_signals == EXPECTED_SIGNAL_HANDLERS) &&
          (signal_handler_runs == EXPECTED_SIGNAL_DELIVERY_STOPS);
 
@@ -289,7 +412,9 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
 
     dprintf(STDOUT_FILENO,
             "CHILD_RESULT abi=%s getpid=%ld errno=%d "
-            "passthrough_ok=%d open=%ld/%d write=%ld/%d read=%ld/%d "
+            "passthrough_ok=%d parallel_ok=%d parallel_threads=%d/%d "
+            "parallel_iterations=%d/%d parallel_failures=%d "
+            "open=%ld/%d write=%ld/%d read=%ld/%d "
             "close=%ld/%d mmap=%d/%d mprotect_ro=%d/%d "
             "mprotect_rw=%d/%d memory=%d munmap=%d/%d "
             "signals_raised=%d signal_handlers=%d "
@@ -298,6 +423,9 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
             "observed_0xf0002=%ld errno=%d "
             "unimplemented_0x%lx=%ld errno=%d expected=%d\n",
             PROBE_ABI, pid_result, pid_errno, passthrough_ok,
+            parallel_ok, parallel.threads_joined, parallel.threads_started,
+            parallel.iterations_completed,
+            PARALLEL_THREADS * PARALLEL_ITERATIONS, parallel.failures,
             passthrough.open_result, passthrough.open_errno,
             passthrough.write_result, passthrough.write_errno,
             passthrough.read_result, passthrough.read_errno,
