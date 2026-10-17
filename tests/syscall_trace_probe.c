@@ -585,14 +585,14 @@ static int exercise_parallel_traced_children(
 
         if (timeout_expired || waited < 0) {
             out->failures++;
-            for (i = 0; i < out->children_started; i++) {
+            for (i = 0; i < tracee_count; i++) {
                 if (!children[i].done) {
                     (void)kill(children[i].pid, SIGKILL);
                     (void)ptrace(PTRACE_CONT, children[i].pid, (void *)0,
                                  (void *)(long)SIGKILL);
                 }
             }
-            for (i = 0; i < out->children_started; i++) {
+            for (i = 0; i < tracee_count; i++) {
                 if (!children[i].done) {
                     do {
                         waited = waitpid(children[i].pid, &status, __WALL);
@@ -625,17 +625,17 @@ static int exercise_parallel_traced_children(
 
             if (WIFEXITED(status) || WIFSIGNALED(status)) {
                 state->done = 1;
-                out->children_completed++;
                 state->exit_code = WIFEXITED(status) ?
                                    WEXITSTATUS(status) :
                                    128 + WTERMSIG(status);
                 if (state->is_fork_child) {
+                    out->fork_children_completed++;
                     if (state->exit_code != 0 ||
                         state->syscall_stops < 12)
                         out->failures++;
-                    out->fork_children_completed++;
                     out->fork_child_syscall_stops += state->syscall_stops;
                 } else {
+                    out->children_completed++;
                     if (state->exit_code != 0 ||
                         state->syscall_stops < PARALLEL_TRACE_MIN_STOPS ||
                         state->signal_delivery_stops != PARALLEL_TRACE_SIGNALS + 2 ||
