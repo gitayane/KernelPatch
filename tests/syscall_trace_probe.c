@@ -13,10 +13,12 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
@@ -39,6 +41,107 @@
 static volatile sig_atomic_t timeout_expired;
 static volatile sig_atomic_t signal_handler_runs;
 
+struct passthrough_result {
+    long open_result;
+    int open_errno;
+    long write_result;
+    int write_errno;
+    long read_result;
+    int read_errno;
+    long close_result;
+    int close_errno;
+    int mmap_ok;
+    int mmap_errno;
+    int mprotect_ro_result;
+    int mprotect_ro_errno;
+    int mprotect_rw_result;
+    int mprotect_rw_errno;
+    int memory_ok;
+    int munmap_result;
+    int munmap_errno;
+};
+
+/*
+ * Exercise representative ordinary syscalls while ptrace forces the traced
+ * entry path: file descriptor operations plus mmap/mprotect/munmap. These hit
+ * multiple argument registers and check that unhooked calls preserve the
+ * original syscall ABI and return values through the dispatcher pass-through.
+ */
+static int exercise_passthrough(struct passthrough_result *out)
+{
+    static const char payload = 'K';
+    char received = 0;
+    int fd;
+    void *mapping;
+    volatile uint32_t *word;
+    const size_t page_size = 4096;
+    const uint32_t first_value = 0x13579bdfu;
+    const uint32_t second_value = 0x2468ace0u;
+    int ok = 1;
+
+    errno = 0;
+    fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    out->open_result = fd;
+    out->open_errno = errno;
+    if (fd < 0) return 0;
+
+    errno = 0;
+    out->write_result = write(fd, &payload, 1);
+    out->write_errno = errno;
+    if (out->write_result != 1) ok = 0;
+
+    errno = 0;
+    out->read_result = read(fd, &received, 1);
+    out->read_errno = errno;
+    if (out->read_result != 0) ok = 0;
+
+    errno = 0;
+    out->close_result = close(fd);
+    out->close_errno = errno;
+    if (out->close_result != 0) ok = 0;
+
+    errno = 0;
+    mapping = mmap((void *)0, page_size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    out->mmap_errno = errno;
+    if (mapping == MAP_FAILED) {
+        out->mmap_ok = 0;
+        return 0;
+    }
+    out->mmap_ok = 1;
+
+    word = (volatile uint32_t *)mapping;
+    *word = first_value;
+
+    errno = 0;
+    out->mprotect_ro_result = mprotect(mapping, page_size, PROT_READ);
+    out->mprotect_ro_errno = errno;
+    if (out->mprotect_ro_result != 0) {
+        ok = 0;
+    } else if (*word != first_value) {
+        ok = 0;
+    }
+
+    errno = 0;
+    out->mprotect_rw_result =
+        mprotect(mapping, page_size, PROT_READ | PROT_WRITE);
+    out->mprotect_rw_errno = errno;
+    if (out->mprotect_rw_result != 0) {
+        ok = 0;
+    } else {
+        *word = second_value;
+        if (*word != second_value) ok = 0;
+    }
+    out->memory_ok = (*word == second_value);
+
+    errno = 0;
+    out->munmap_result = munmap(mapping, page_size);
+    out->munmap_errno = errno;
+    if (out->munmap_result != 0) ok = 0;
+
+    return ok && out->memory_ok;
+}
+
 static void on_alarm(int signo)
 {
     (void)signo;
@@ -60,6 +163,8 @@ static void child_probe(void)
     long unsupported_result;
     int unsupported_errno;
     int raised_signals = 0;
+    int passthrough_ok;
+    struct passthrough_result passthrough = {0};
     int ok;
     struct sigaction sa = {0};
 
@@ -83,6 +188,8 @@ static void child_probe(void)
     errno = 0;
     pid_result = syscall(SYS_getpid);
     pid_errno = errno;
+
+    passthrough_ok = exercise_passthrough(&passthrough);
 
     /*
      * Exercise signal delivery and the userspace signal-return trampoline while
@@ -120,6 +227,7 @@ static void child_probe(void)
 
     ok = (pid_result > 0 && pid_errno == 0) &&
          (unsupported_result == -1 && unsupported_errno == ENOSYS) &&
+         passthrough_ok &&
          (raised_signals == EXPECTED_SIGNAL_HANDLERS) &&
          (signal_handler_runs == EXPECTED_SIGNAL_HANDLERS);
 
@@ -139,10 +247,22 @@ static void child_probe(void)
 
     dprintf(STDOUT_FILENO,
             "CHILD_RESULT abi=%s getpid=%ld errno=%d "
+            "passthrough_ok=%d open=%ld/%d write=%ld/%d read=%ld/%d "
+            "close=%ld/%d mmap=%d/%d mprotect_ro=%d/%d "
+            "mprotect_rw=%d/%d memory=%d munmap=%d/%d "
             "signals_raised=%d signal_handlers=%d "
             "observed_0xf0002=%ld errno=%d "
             "unimplemented_0x%lx=%ld errno=%d expected=%d\n",
-            PROBE_ABI, pid_result, pid_errno, raised_signals,
+            PROBE_ABI, pid_result, pid_errno, passthrough_ok,
+            passthrough.open_result, passthrough.open_errno,
+            passthrough.write_result, passthrough.write_errno,
+            passthrough.read_result, passthrough.read_errno,
+            passthrough.close_result, passthrough.close_errno,
+            passthrough.mmap_ok, passthrough.mmap_errno,
+            passthrough.mprotect_ro_result, passthrough.mprotect_ro_errno,
+            passthrough.mprotect_rw_result, passthrough.mprotect_rw_errno,
+            passthrough.memory_ok, passthrough.munmap_result,
+            passthrough.munmap_errno, raised_signals,
             (int)signal_handler_runs, observed_result, observed_errno,
             (unsigned long)UNIMPLEMENTED_NR, unsupported_result,
             unsupported_errno, ok);
