@@ -37,7 +37,7 @@
 #define MAX_SYSCALL_STOPS 100000UL
 #define TIMEOUT_SECONDS 30U
 #define EXPECTED_SIGNAL_HANDLERS 3
-#define EXPECTED_SIGNAL_DELIVERY_STOPS (EXPECTED_SIGNAL_HANDLERS + 1)
+#define EXPECTED_SIGNAL_DELIVERY_STOPS (EXPECTED_SIGNAL_HANDLERS + 2)
 
 static volatile sig_atomic_t timeout_expired;
 static volatile sig_atomic_t signal_handler_runs;
@@ -171,14 +171,18 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
     int passthrough_ok;
     struct passthrough_result passthrough = {0};
     int ok;
+    long interrupted_read_result;
+    int interrupted_read_errno;
+    int interrupted_read_ok;
     long restart_read_result;
     int restart_read_errno;
     int restart_read_ok;
+    char interrupted_byte = 0;
     char restart_byte = 0;
     struct sigaction sa = {0};
 
     sa.sa_handler = on_usr1;
-    sa.sa_flags = SA_RESTART;
+    sa.sa_flags = 0;
     sigemptyset(&sa.sa_mask);
     if (sigaction(SIGUSR1, &sa, (struct sigaction *)0) == -1) {
         dprintf(STDERR_FILENO, "PROBE_ERROR sigaction errno=%d\n", errno);
@@ -217,15 +221,30 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
     }
 
     /*
-     * Test a genuinely interrupted blocking syscall. The tracer sends SIGUSR1
-     * after this read has entered the kernel, then supplies one byte after the
-     * signal-delivery stop. SA_RESTART should make read resume and return it.
+     * First check the non-restarting case. The tracer interrupts this blocked
+     * read with SIGUSR1 while the handler has no SA_RESTART flag. The expected
+     * result is -1/EINTR; the tracer must not write data for this first read.
      */
     restart->stage = 1;
     errno = 0;
+    interrupted_read_result = (long)read(restart_read_fd, &interrupted_byte, 1);
+    interrupted_read_errno = errno;
+    restart->stage = 2;
+    interrupted_read_ok = (interrupted_read_result == -1 &&
+                           interrupted_read_errno == EINTR);
+
+    /* Now repeat with SA_RESTART; the tracer supplies one byte after delivery. */
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(SIGUSR1, &sa, (struct sigaction *)0) == -1) {
+        dprintf(STDERR_FILENO,
+                "PROBE_ERROR enable SA_RESTART errno=%d\n", errno);
+        _exit(94);
+    }
+    restart->stage = 3;
+    errno = 0;
     restart_read_result = (long)read(restart_read_fd, &restart_byte, 1);
     restart_read_errno = errno;
-    restart->stage = 2;
+    restart->stage = 4;
     restart_read_ok = (restart_read_result == 1 && restart_read_errno == 0 &&
                        restart_byte == 'R');
 
@@ -250,7 +269,7 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
 
     ok = (pid_result > 0 && pid_errno == 0) &&
          (unsupported_result == -1 && unsupported_errno == ENOSYS) &&
-         passthrough_ok && restart_read_ok &&
+         passthrough_ok && interrupted_read_ok && restart_read_ok &&
          (raised_signals == EXPECTED_SIGNAL_HANDLERS) &&
          (signal_handler_runs == EXPECTED_SIGNAL_DELIVERY_STOPS);
 
@@ -274,6 +293,7 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
             "close=%ld/%d mmap=%d/%d mprotect_ro=%d/%d "
             "mprotect_rw=%d/%d memory=%d munmap=%d/%d "
             "signals_raised=%d signal_handlers=%d "
+            "interrupt_read_ok=%d interrupt_read=%ld/%d interrupt_byte=%u "
             "restart_read_ok=%d restart_read=%ld/%d restart_byte=%u "
             "observed_0xf0002=%ld errno=%d "
             "unimplemented_0x%lx=%ld errno=%d expected=%d\n",
@@ -287,8 +307,11 @@ static void child_probe(int restart_read_fd, struct restart_state *restart)
             passthrough.mprotect_rw_result, passthrough.mprotect_rw_errno,
             passthrough.memory_ok, passthrough.munmap_result,
             passthrough.munmap_errno, raised_signals,
-            (int)signal_handler_runs, restart_read_ok, restart_read_result,
-            restart_read_errno, (unsigned int)(unsigned char)restart_byte,
+            (int)signal_handler_runs, interrupted_read_ok,
+            interrupted_read_result, interrupted_read_errno,
+            (unsigned int)(unsigned char)interrupted_byte,
+            restart_read_ok, restart_read_result, restart_read_errno,
+            (unsigned int)(unsigned char)restart_byte,
             observed_result, observed_errno,
             (unsigned long)UNIMPLEMENTED_NR, unsupported_result,
             unsupported_errno, ok);
@@ -300,7 +323,8 @@ int main(void)
     pid_t child;
     int restart_pipe[2] = {-1, -1};
     struct restart_state *restart = MAP_FAILED;
-    int read_signal_sent = 0;
+    int interrupted_signal_sent = 0;
+    int restart_signal_sent = 0;
     int restart_byte_written = 0;
     int status = 0;
     int options_set = 0;
@@ -384,6 +408,7 @@ int main(void)
 
         int signal_to_deliver = 0;
         int trigger_read_signal = 0;
+        int trigger_read_stage = 0;
         int deliver_restart_data = 0;
         {
             int sig = WSTOPSIG(status);
@@ -410,8 +435,13 @@ int main(void)
                 options_set = 1;
             } else if (sig == (SIGTRAP | 0x80)) {
                 syscall_stops++;
-                if (restart->stage == 1 && !read_signal_sent)
+                if (restart->stage == 1 && !interrupted_signal_sent) {
                     trigger_read_signal = 1;
+                    trigger_read_stage = 1;
+                } else if (restart->stage == 3 && !restart_signal_sent) {
+                    trigger_read_signal = 1;
+                    trigger_read_stage = 3;
+                }
                 if (syscall_stops > MAX_SYSCALL_STOPS) {
                     dprintf(STDERR_FILENO,
                             "PROBE_FAIL exceeded syscall-stop limit\n");
@@ -427,7 +457,7 @@ int main(void)
                  */
                 signal_to_deliver = sig;
                 signal_delivery_stops++;
-                if (restart->stage == 1 && read_signal_sent &&
+                if (restart->stage == 3 && restart_signal_sent &&
                     !restart_byte_written)
                     deliver_restart_data = 1;
             } else {
@@ -461,7 +491,10 @@ int main(void)
                 exit_code = 2;
                 break;
             }
-            read_signal_sent = 1;
+            if (trigger_read_stage == 1)
+                interrupted_signal_sent = 1;
+            else if (trigger_read_stage == 3)
+                restart_signal_sent = 1;
         }
 
         if (deliver_restart_data) {
@@ -487,7 +520,8 @@ int main(void)
     alarm(0);
     if (exit_code == 0 && syscall_stops >= 6 &&
         signal_delivery_stops == EXPECTED_SIGNAL_DELIVERY_STOPS &&
-        read_signal_sent && restart_byte_written && restart->stage == 2) {
+        interrupted_signal_sent && restart_signal_sent &&
+        restart_byte_written && restart->stage == 4) {
         dprintf(STDOUT_FILENO,
                 "PROBE_PASS abi=%s ptrace_syscall_stops=%lu "
                 "signal_delivery_stops=%lu child_exit=0\n",
