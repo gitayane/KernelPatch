@@ -349,11 +349,17 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
     // long can be distinguished from a valid key ending at the boundary.
     char arg1[SUPER_KEY_LEN + 2] = { 0 };
     long arg1_len = compat_strncpy_from_user(arg1, p1, sizeof(arg1));
-    if (arg1_len <= 0 || arg1_len >= sizeof(arg1)) return;
+    if (arg1_len <= 0 || arg1_len >= sizeof(arg1)) {
+        kp_secret_wipe(arg1, sizeof(arg1));
+        return;
+    }
 
-    if (!auth_superkey(arg1)) {
+    int valid_key = !auth_superkey(arg1);
+    int requested_su = !strcmp("su", arg1);
+    kp_secret_wipe(arg1, sizeof(arg1));
+    if (valid_key) {
         is_key_auth = 1;
-    } else if (!strcmp("su", arg1)) {
+    } else if (requested_su) {
         uid_t uid = current_uid();
         if (!is_su_allow_uid(uid) && !is_trusted_manager) return;
         su_allow_uid_profile(0, uid, &profile);
@@ -445,6 +451,14 @@ void handle_supercmd(char **__user u_filename_p, char **__user uargv)
         supercmd_exec(u_filename_p, sh_path, &sp);
         *uargv += pi * 8;
         goto free;
+    }
+
+    /* SU permission alone must not grant superuser-manager administration. */
+    if (!is_key_auth && (!strcmp("sumgr", cmd) || !strcmp("reload-cfg", cmd) ||
+                         !strcmp("bootlog", cmd) || !strcmp("test", cmd))) {
+        cmd_res.rc = -EPERM;
+        cmd_res.err_msg = "administrator authentication required";
+        goto echo;
     }
 
     if (!strcmp("help", cmd)) {
