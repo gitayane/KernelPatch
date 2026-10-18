@@ -15,7 +15,7 @@ on:
         type: boolean
         default: false
       enable_xzp_44_dispatcher:
-        description: "EXPERIMENTAL: enable the Linux 4.4 global syscall dispatcher in the Android kpimg"
+        description: "EXPERIMENTAL: enable the Linux 4.4 global dispatcher; selects the safe single-B trace-island path unless a diagnostic mode is selected"
         required: true
         type: boolean
         default: false
@@ -30,7 +30,7 @@ on:
         type: boolean
         default: false
       enable_xzp_44_trace_bypass_test:
-        description: "DIAGNOSTIC ONLY: patch trace entry and replay LDR/BLR/STR in assembly; no C dispatcher, legacy syscall-table hooks retained"
+        description: "ADVANCED: force the single-B trace-island path used by the active C-backed dispatcher; preserves trace+4/+8 shared continuation"
         required: true
         type: boolean
         default: false
@@ -282,6 +282,27 @@ jobs:
             echo "::error::Wrapper-prefix-only mode is mutually exclusive with other diagnostic modes"
             exit 1
           fi
+          # The former default path patched three trace-site instructions and
+          # reproduced the dev.127 BUG at PC=0x400800 / LR=__ni_sys_trace+8.
+          # For a normal live dispatcher build, select the single-B trace island
+          # automatically. Diagnostic-only modes stay opt-in and retain their
+          # requested isolated behavior.
+          if [[ "${EXPERIMENTAL_44_DISPATCHER}" == "1" &&
+                "${EXPERIMENTAL_44_TRACE_BYPASS}" == "0" &&
+                "${EXPERIMENTAL_44_TRACE_ONLY}" == "0" &&
+                "${EXPERIMENTAL_44_FAST_ONLY}" == "0" &&
+                "${EXPERIMENTAL_44_FAST_BYPASS}" == "0" &&
+                "${EXPERIMENTAL_44_PATCH_RESTORE}" == "0" &&
+                "${EXPERIMENTAL_44_PREPARE_ONLY}" == "0" &&
+                "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "0" &&
+                "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "0" &&
+                "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "0" &&
+                "${EXPERIMENTAL_44_WRAPPER_LIST_ONLY}" == "0" &&
+                "${EXPERIMENTAL_44_WRAPPER_PREFIX_ONLY}" == "0" ]]; then
+            EXPERIMENTAL_44_TRACE_BYPASS=1
+            echo "::notice::Live Linux 4.4 dispatcher build uses the single-B trace-island path"
+          fi
+
           if [[ "${EXPERIMENTAL_44_TRACE_BYPASS}" == "1" && ( "${EXPERIMENTAL_44_TRACE_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_ONLY}" == "1" || "${EXPERIMENTAL_44_FAST_BYPASS}" == "1" || "${EXPERIMENTAL_44_PATCH_RESTORE}" == "1" || "${EXPERIMENTAL_44_PREPARE_ONLY}" == "1" || "${EXPERIMENTAL_44_SYMBOLS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPERS_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_FIRST_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_LIST_ONLY}" == "1" || "${EXPERIMENTAL_44_WRAPPER_PREFIX_ONLY}" == "1" ) ]]; then
             echo "::error::Trace-bypass mode is mutually exclusive with all other diagnostic modes"
             exit 1
@@ -289,7 +310,7 @@ jobs:
           echo "Linux 4.4 experimental dispatcher build flag: ${EXPERIMENTAL_44_DISPATCHER}"
           echo "Linux 4.4 fast-only diagnostic build flag: ${EXPERIMENTAL_44_FAST_ONLY}"
           echo "Linux 4.4 trace-only diagnostic build flag: ${EXPERIMENTAL_44_TRACE_ONLY}"
-          echo "Linux 4.4 trace-bypass diagnostic build flag: ${EXPERIMENTAL_44_TRACE_BYPASS}"
+          echo "Linux 4.4 single-B trace-island path flag: ${EXPERIMENTAL_44_TRACE_BYPASS}"
           echo "Linux 4.4 fast-bypass diagnostic build flag: ${EXPERIMENTAL_44_FAST_BYPASS}"
           echo "Linux 4.4 patch-restore diagnostic build flag: ${EXPERIMENTAL_44_PATCH_RESTORE}"
           echo "Linux 4.4 prepare-only diagnostic build flag: ${EXPERIMENTAL_44_PREPARE_ONLY}"
