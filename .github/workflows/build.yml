@@ -327,10 +327,11 @@ jobs:
           make
           mv syscallhook.kpm demo-syscallhook.kpm
 
-      - name: Upload elf
+      - name: Upload kpimg build outputs
         uses: actions/upload-artifact@v4
         with:
           path: |
+            kernel/kpimg-android
             kernel/kpimg.elf-linux
             kernel/kpimg.elf-android
             kernel/kpimg-x86.elf
