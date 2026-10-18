@@ -466,6 +466,12 @@ jobs:
           7z a kptools-msys2-win.7z win
           dir .
 
+      - name: Upload Windows kptools package
+        uses: actions/upload-artifact@v4
+        with:
+          name: kptools-msys2-win
+          path: kptools-msys2-win.7z
+
       - name: Release
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/release/') || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'workflow_dispatch' && inputs.publish_preview) || (startsWith(github.ref, 'refs/heads/work/') && github.event_name == 'push' && startsWith(github.event.head_commit.message, '[publish-preview]'))
         uses: ncipollo/release-action@v1.12.0
