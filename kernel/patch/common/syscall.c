@@ -530,6 +530,36 @@ KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
 #error "TRACE_ONLY is mutually exclusive with other dispatcher diagnostic modes"
 #endif
 
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+#define KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS must be 0 or 1"
+#endif
+
+/*
+ * The historical three-word live trace-site patch corrupts the shared
+ * __ni_sys_trace+8 continuation (reproduced by the Oct 18, 2026 device log).
+ * A normal live dispatcher build must use the verified single-B trace island.
+ * Diagnostic modes remain available without TRACE_BYPASS because they do not
+ * install the live C-backed dispatcher.
+ */
+#if KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY
+#error "Live Linux 4.4 dispatcher requires TRACE_BYPASS=1 (safe single-B trace island)"
+#endif
+
 #if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
 typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
 typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
