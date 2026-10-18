@@ -333,6 +333,17 @@ jobs:
           mv kpimg kpimg-linux
           mv kpimg.elf kpimg.elf-linux
 
+          # Always compile-test the exact live XZP dispatcher configuration.
+          # The ordinary push artifact above remains on the safe default path;
+          # this second image explicitly enables the single-B trace island.
+          make clean
+          export ANDROID=1
+          make hdr kpimg KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=1 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS=1 KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=0 KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE=0 KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY=0 KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY=0
+          mv kpimg kpimg-android-dispatcher-test
+          mv kpimg.elf kpimg.elf-android-dispatcher-test
+          make clean
+          unset ANDROID
+
           cd ..
           cd kpms
 
@@ -353,8 +364,10 @@ jobs:
         with:
           path: |
             kernel/kpimg-android
+            kernel/kpimg-android-dispatcher-test
             kernel/kpimg.elf-linux
             kernel/kpimg.elf-android
+            kernel/kpimg.elf-android-dispatcher-test
             kernel/kpimg-x86.elf
           name: kpimg.elf
 
