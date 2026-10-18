@@ -36,6 +36,9 @@
 #include <userd.h>
 #endif
 
+#include <kpscauth.h>
+#include <kpsecret.h>
+
 #define MAX_KEY_LEN 128
 
 #include <linux/umh.h>
@@ -287,6 +290,11 @@ static long call_kstorage_remove(int gid, long did)
 
 static long supercall(int is_authed, long cmd, long arg1, long arg2, long arg3, long arg4)
 {
+    /* A caller with SU permission is not an administrator. Keep unauthenticated
+     * supercalls read-only and restrict profile reads to the caller's own UID. */
+    if (!is_authed && !kp_supercall_allowed_for_su(cmd)) return -EPERM;
+    if (!is_authed && cmd == SUPERCALL_SU_PROFILE && (uid_t)arg1 != current_uid()) return -EPERM;
+
     switch (cmd) {
     case SUPERCALL_HELLO:
         logki(SUPERCALL_HELLO_ECHO "\n");
@@ -417,8 +425,9 @@ static void before(hook_fargs6_t *args, void *udata)
         
         char key[MAX_KEY_LEN] = { 0 };
         long len = compat_strncpy_from_user(key, key_user, MAX_KEY_LEN);
+        if (len > 0) is_authed = !auth_superkey(key);
+        kp_secret_wipe(key, sizeof(key));
         if (len <= 0) return;
-        is_authed = !auth_superkey(key);
         is_trusted_caller = is_authed;
     }
     if (is_trusted_manager_uid(uid)) {
