@@ -391,7 +391,7 @@ static void *traced_clone_thread_main(void *opaque)
     }
 
     dprintf(STDOUT_FILENO,
-            "TRACED_CLONE_THREAD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1\\n",
+            "TRACED_CLONE_THREAD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1\n",
             PROBE_ABI, pid, tid);
     arg->completed = 1;
     return (void *)0;
