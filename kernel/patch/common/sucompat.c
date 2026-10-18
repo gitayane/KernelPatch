@@ -461,7 +461,21 @@ static void after_getname_flags(hook_fargs3_t *args, void *udata)
     if (!is_su_allow_uid(uid) && !is_trusted_manager_uid(uid)) return;
 
     const char *name = fn->name;
-    if (!name || strcmp(name, su_get_path())) return;
+    if (!name) return;
+
+#ifdef ANDROID
+    /*
+     * Keep the VFS path hook consistent with the syscall fallback and execve
+     * compatibility path: granted callers should see a usable shell through
+     * both the configured KP path (/system/bin/kp by default) and the legacy
+     * /system/bin/su path. When both VFS hooks are installed, the legacy
+     * fstatat/faccessat fallback is intentionally skipped, so this check must
+     * cover both names here.
+     */
+    if (strcmp(name, su_get_path()) && strcmp(name, legacy_su_path)) return;
+#else
+    if (strcmp(name, su_get_path())) return;
+#endif
 
     if (strlen(sh_path) <= strlen(name)) {
         strcpy((char *)name, sh_path);
