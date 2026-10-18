@@ -1,4 +1,5 @@
 #include <kputils.h>
+#include <kpsecret.h>
 #include <stdarg.h>
 #include <sucompat.h>
 #include <linux/string.h>
@@ -131,8 +132,9 @@ static void handle_cmd_sumgr(char **__user u_filename_p, const char **carr, char
         }
         if (carr[3]) kstrtoull(carr[3], 10, &to_uid);
         if (carr[4]) scontext = carr[4];
-        su_add_allow_uid(uid, to_uid, scontext);
-        sprintf(buffer, "grant %d, %d, %s", uid, to_uid, scontext);
+        cmd_res->rc = su_add_allow_uid(uid, to_uid, scontext);
+        if (cmd_res->rc) return;
+        snprintf(buffer, buflen, "grant %llu, %llu", uid, to_uid);
         cmd_res->msg = buffer;
     } else if (!strcmp(sub_cmd, "revoke")) {
         const char *suid = carr[2];
@@ -243,12 +245,14 @@ static void handle_cmd_key_auth(char **__user u_filename_p, const char *cmd, con
             cmd_res->msg = get_superkey();
         } else if (!strcmp("set", sub_cmd)) {
             const char *key = carr[2];
-            if (!key) {
+            unsigned long len = kp_secret_length(key, SUPER_KEY_LEN);
+            if (!key || !len || len >= SUPER_KEY_LEN) {
+                cmd_res->rc = -EINVAL;
                 cmd_res->err_msg = "invalid new key";
                 return;
             }
-            cmd_res->msg = key;
             reset_superkey(key);
+            cmd_res->msg = "key updated";
         } else if (!strcmp("hash", sub_cmd)) {
             const char *able = carr[2];
             if (able && !strcmp("enable", able)) {

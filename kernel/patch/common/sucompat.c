@@ -160,7 +160,7 @@ int su_add_allow_uid(uid_t uid, uid_t to_uid, const char *scontext)
     };
     memcpy(profile.scontext, scontext, SUPERCALL_SCONTEXT_LEN);
     int rc = write_kstorage(su_kstorage_gid, uid, &profile, 0, sizeof(struct su_profile), false);
-    logkfd("uid: %d, to_uid: %d, sctx: %s, rc: %d\n", uid, to_uid, scontext, rc);
+    logkfd("uid: %d, to_uid: %d, rc: %d\n", uid, to_uid, rc);
     return rc;
 }
 KP_EXPORT_SYMBOL(su_add_allow_uid);
