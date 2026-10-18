@@ -49,7 +49,8 @@
 #define PARALLEL_TRACE_MIN_STOPS 100UL
 #define PARALLEL_TRACE_SIGNALS 2
 #define PARALLEL_TRACE_CLONE_THREADS 2
-#define MAX_TRACED_TASKS (PARALLEL_TRACE_CHILDREN * (2 + PARALLEL_TRACE_CLONE_THREADS))
+#define PARALLEL_TRACE_VFORK_CHILDREN 1
+#define MAX_TRACED_TASKS (PARALLEL_TRACE_CHILDREN * (3 + PARALLEL_TRACE_CLONE_THREADS))
 
 static volatile sig_atomic_t timeout_expired;
 static volatile sig_atomic_t signal_handler_runs;
@@ -77,6 +78,7 @@ struct traced_child_state {
     pid_t pid;
     int index;
     int is_fork_child;
+    int is_vfork_child;
     int is_clone_thread;
     int options_set;
     int done;
@@ -106,6 +108,11 @@ struct traced_parallel_result {
     int fork_events;
     int fork_children_started;
     int fork_children_completed;
+    int vfork_events;
+    int vfork_children_started;
+    int vfork_children_completed;
+    int vfork_exec_events;
+    unsigned long vfork_child_syscall_stops;
     int clone_events;
     int clone_threads_started;
     int clone_threads_completed;
@@ -397,6 +404,56 @@ static void *traced_clone_thread_main(void *opaque)
     return (void *)0;
 }
 
+static int traced_vfork_child_main(void)
+{
+    static const char payload = 'V';
+    const size_t page_size = 4096;
+    long pid = syscall(SYS_getpid);
+    long tid = syscall(SYS_gettid);
+    int fd;
+    char byte = 0;
+    void *mapping;
+    volatile uint32_t *word;
+    const uint32_t value = 0x56464f52u;
+
+    if (pid <= 0 || tid <= 0 || tid != pid)
+        return 141;
+    fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return 142;
+    if (write(fd, &payload, 1) != 1 ||
+        read(fd, &byte, 1) != 0 || close(fd) != 0)
+        return 143;
+
+    mapping = mmap((void *)0, page_size, PROT_READ | PROT_WRITE,
+                  MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapping == MAP_FAILED)
+        return 144;
+    word = (volatile uint32_t *)mapping;
+    *word = value;
+    if (mprotect(mapping, page_size, PROT_READ) != 0 ||
+        *word != value) {
+        (void)munmap(mapping, page_size);
+        return 145;
+    }
+    if (mprotect(mapping, page_size, PROT_READ | PROT_WRITE) != 0) {
+        (void)munmap(mapping, page_size);
+        return 146;
+    }
+    *word = ~value;
+    if (*word != ~value) {
+        (void)munmap(mapping, page_size);
+        return 147;
+    }
+    if (munmap(mapping, page_size) != 0)
+        return 148;
+
+    dprintf(STDOUT_FILENO,
+            "TRACED_VFORK_CHILD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1\n",
+            PROBE_ABI, pid, tid);
+    return 0;
+}
+
 static int traced_exec_child_main(void)
 {
     static const char payload = 'E';
@@ -480,9 +537,27 @@ static int traced_exec_child_main(void)
         _exit(0);
     }
 
-    /* The external ptrace parent reaps and validates the traced child. */
+    {
+        char *const vfork_argv[] = {
+            (char *)"syscall_trace_probe", (char *)"--trace-vfork-child",
+            (char *)0
+        };
+        char *const exec_envp[] = {
+            (char *)"PATH=/system/bin", (char *)0
+        };
+        pid_t vfork_child = vfork();
+
+        if (vfork_child < 0)
+            return 128;
+        if (vfork_child == 0) {
+            execve(PROBE_EXEC_PATH, vfork_argv, exec_envp);
+            _exit(149);
+        }
+    }
+
+    /* The external ptrace parent reaps and validates traced children. */
     dprintf(STDOUT_FILENO,
-            "TRACED_EXEC_CHILD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1 fork_child=1 clone_threads=%d\n",
+            "TRACED_EXEC_CHILD_PASS abi=%s getpid=%ld gettid=%ld file_ops=1 memory=1 fork_child=1 vfork_child=1 clone_threads=%d\n",
             PROBE_ABI, pid, tid, PARALLEL_TRACE_CLONE_THREADS);
     return 0;
 }
@@ -655,6 +730,7 @@ static int exercise_parallel_traced_children(
 
     while (out->children_completed < out->children_started ||
            out->fork_children_completed < out->fork_children_started ||
+           out->vfork_children_completed < out->vfork_children_started ||
            out->clone_threads_completed < out->clone_threads_started) {
         int status = 0;
         pid_t waited;
@@ -714,6 +790,13 @@ static int exercise_parallel_traced_children(
                         state->syscall_stops < 12)
                         out->failures++;
                     out->fork_child_syscall_stops += state->syscall_stops;
+                } else if (state->is_vfork_child) {
+                    out->vfork_children_completed++;
+                    out->vfork_child_syscall_stops += state->syscall_stops;
+                    if (state->exit_code != 0 ||
+                        state->syscall_stops < 12 ||
+                        state->exec_events != 1)
+                        out->failures++;
                 } else if (state->is_clone_thread) {
                     out->clone_threads_completed++;
                     out->clone_thread_syscall_stops += state->syscall_stops;
@@ -755,7 +838,7 @@ static int exercise_parallel_traced_children(
             if (!state->options_set) {
                 if (sig != SIGSTOP ||
                     ptrace(PTRACE_SETOPTIONS, state->pid, (void *)0,
-                           (void *)(long)(PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE)) == -1) {
+                           (void *)(long)(PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEEXEC | PTRACE_O_TRACEFORK | PTRACE_O_TRACEVFORK | PTRACE_O_TRACECLONE)) == -1) {
                     out->failures++;
                     (void)kill(state->pid, SIGKILL);
                     (void)ptrace(PTRACE_CONT, state->pid, (void *)0,
@@ -783,6 +866,25 @@ static int exercise_parallel_traced_children(
                 out->fork_events++;
                 out->fork_children_started++;
             } else if (sig == SIGTRAP &&
+                       ((unsigned int)status >> 16) == PTRACE_EVENT_VFORK) {
+                unsigned long new_pid = 0;
+                if (tracee_count >= MAX_TRACED_TASKS ||
+                    ptrace(PTRACE_GETEVENTMSG, state->pid, (void *)0,
+                           &new_pid) == -1 || new_pid == 0) {
+                    out->failures++;
+                    (void)kill(state->pid, SIGKILL);
+                    (void)ptrace(PTRACE_CONT, state->pid, (void *)0,
+                                 (void *)(long)SIGKILL);
+                    continue;
+                }
+                children[tracee_count].pid = (pid_t)new_pid;
+                children[tracee_count].index = state->index;
+                children[tracee_count].is_vfork_child = 1;
+                children[tracee_count].options_set = 0;
+                tracee_count++;
+                out->vfork_events++;
+                out->vfork_children_started++;
+            } else if (sig == SIGTRAP &&
                        ((unsigned int)status >> 16) == PTRACE_EVENT_CLONE) {
                 unsigned long new_tid = 0;
                 if (tracee_count >= MAX_TRACED_TASKS ||
@@ -805,6 +907,8 @@ static int exercise_parallel_traced_children(
             } else if (sig == SIGTRAP &&
                        ((unsigned int)status >> 16) == PTRACE_EVENT_EXEC) {
                 state->exec_events++;
+                if (state->is_vfork_child)
+                    out->vfork_exec_events++;
             } else if (sig == (SIGTRAP | 0x80)) {
                 state->syscall_stops++;
                 out->syscall_stops++;
@@ -887,6 +991,10 @@ static int exercise_parallel_traced_children(
               out->fork_events == PARALLEL_TRACE_CHILDREN &&
               out->fork_children_started == PARALLEL_TRACE_CHILDREN &&
               out->fork_children_completed == PARALLEL_TRACE_CHILDREN &&
+              out->vfork_events == PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_VFORK_CHILDREN &&
+              out->vfork_children_started == PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_VFORK_CHILDREN &&
+              out->vfork_children_completed == PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_VFORK_CHILDREN &&
+              out->vfork_exec_events == PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_VFORK_CHILDREN &&
               out->clone_events == PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_CLONE_THREADS &&
               out->clone_threads_started == PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_CLONE_THREADS &&
               out->clone_threads_completed == PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_CLONE_THREADS &&
@@ -1088,6 +1196,8 @@ int main(int argc, char **argv)
     pid_t child;
     if (argc == 2 && strcmp(argv[1], "--trace-exec-child") == 0)
         return traced_exec_child_main();
+    if (argc == 2 && strcmp(argv[1], "--trace-vfork-child") == 0)
+        return traced_vfork_child_main();
     int restart_pipe[2] = {-1, -1};
     struct restart_state *restart = MAP_FAILED;
     int interrupted_signal_sent = 0;
@@ -1300,6 +1410,8 @@ int main(int argc, char **argv)
                 "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
                 "multi_trace_exec_events=%d/%d multi_trace_fork_events=%d "
                 "multi_trace_fork_children=%d/%d fork_child_syscall_stops=%lu "
+                "multi_trace_vfork_events=%d multi_trace_vfork_children=%d/%d "
+                "multi_trace_vfork_exec_events=%d vfork_child_syscall_stops=%lu "
                 "multi_trace_clone_events=%d multi_trace_clone_threads=%d/%d "
                 "clone_thread_syscall_stops=%lu multi_trace_sigchld_stops=%d multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
                 "multi_trace_restart_reads=%d/%d multi_trace_failures=%d\n",
@@ -1312,6 +1424,11 @@ int main(int argc, char **argv)
                 traced_parallel.fork_children_completed,
                 traced_parallel.fork_children_started,
                 traced_parallel.fork_child_syscall_stops,
+                traced_parallel.vfork_events,
+                traced_parallel.vfork_children_completed,
+                traced_parallel.vfork_children_started,
+                traced_parallel.vfork_exec_events,
+                traced_parallel.vfork_child_syscall_stops,
                 traced_parallel.clone_events,
                 traced_parallel.clone_threads_completed,
                 PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_CLONE_THREADS,
@@ -1334,6 +1451,8 @@ int main(int argc, char **argv)
             "multi_trace_children=%d/%d multi_trace_syscall_stops=%lu "
             "multi_trace_exec_events=%d/%d multi_trace_fork_events=%d "
             "multi_trace_fork_children=%d/%d fork_child_syscall_stops=%lu "
+            "multi_trace_vfork_events=%d multi_trace_vfork_children=%d/%d "
+            "multi_trace_vfork_exec_events=%d vfork_child_syscall_stops=%lu "
             "multi_trace_clone_events=%d multi_trace_clone_threads=%d/%d "
             "clone_thread_syscall_stops=%lu multi_trace_sigchld_stops=%d multi_trace_signal_stops=%lu multi_trace_interrupt_reads=%d/%d "
                 "multi_trace_restart_reads=%d/%d multi_trace_failures=%d\n",
@@ -1345,6 +1464,11 @@ int main(int argc, char **argv)
             traced_parallel.fork_children_completed,
             traced_parallel.fork_children_started,
             traced_parallel.fork_child_syscall_stops,
+            traced_parallel.vfork_events,
+            traced_parallel.vfork_children_completed,
+            traced_parallel.vfork_children_started,
+            traced_parallel.vfork_exec_events,
+            traced_parallel.vfork_child_syscall_stops,
             traced_parallel.clone_events,
             traced_parallel.clone_threads_completed,
             PARALLEL_TRACE_CHILDREN * PARALLEL_TRACE_CLONE_THREADS,
