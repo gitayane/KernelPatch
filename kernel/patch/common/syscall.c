@@ -1818,6 +1818,18 @@ static int syscall_dispatch_4_4_init(void)
         return 0;
     }
 #else
+#if !KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && !KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
+    /*
+     * The legacy active path patches all three trace-site instructions. It has
+     * already produced the dev.127 failure (PC=0x400800, LR=__ni_sys_trace+8)
+     * because trace+8 is also a shared continuation for the native invalid
+     * syscall path. Never execute that known-unsafe patch by default. The live
+     * dispatcher must use the single-B trace island, while explicit fast-only
+     * diagnostics keep their isolated, trace-site-untouched behaviour.
+     */
+    log_boot("4.4 dispatcher: unsafe three-word trace-site patch disabled; use the single-B trace-island path; no kernel text writes\n");
+    return -EOPNOTSUPP;
+#endif
     int rc = hotpatch(fast_addrs, fast_patch, 3);
     if (rc) {
         int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
