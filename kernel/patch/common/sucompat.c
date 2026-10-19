@@ -541,13 +541,12 @@ static void after_getname_flags(hook_fargs3_t *args, void *udata)
     logkfi("uid: %d, cannot redirect su path to %s\n", uid, target_path);
 }
 
-// stat-class probes on a real third-party su binary: security_inode_getattr fires
-// because the file genuinely exists. Show it only to granted uids (return 0, same
-// as the virtual su path which getname_flags redirects to sh for them) and hide
-// it from everyone else by failing the getattr (-ENOENT), which makes vfs_getattr
-// report ENOENT and the probe sees no su. struct path is { mnt; dentry; }.
-typedef char *(*su_dentry_path_raw_t)(void *dentry, char *buf, int buflen);
-static su_dentry_path_raw_t su_dentry_path_raw = 0;
+// Use d_path(), not dentry_path_raw(): the latter omits the mountpoint, so a file
+// mounted at /system/bin/su is represented as /bin/su and will not match the
+// absolute Android alias. d_path() receives struct path and returns the mount-aware
+// pathname for both getattr and file-open hooks.
+typedef char *(*su_d_path_t)(const struct path *path, char *buf, int buflen);
+static su_d_path_t su_d_path = 0;
 
 static bool su_is_target_dentry_path(const char *path)
 {
@@ -566,14 +565,12 @@ static void after_security_inode_getattr(hook_fargs1_t *args, void *udata)
     uid_t uid = current_uid();
     bool granted = is_su_allow_uid(uid) || is_trusted_manager_uid(uid);
 
-    void *path = (void *)args->arg0;
-    if (!path) return;
-    void *dentry = *(void **)((char *)path + 8); // path->dentry
-    if (!dentry || !su_dentry_path_raw) return;
+    const struct path *path = (const struct path *)args->arg0;
+    if (!path || !su_d_path) return;
 
     char buf[PATH_MAX];
-    char *p = su_dentry_path_raw(dentry, buf, sizeof(buf));
-    if (!su_is_target_dentry_path(p)) return;
+    char *p = su_d_path(path, buf, sizeof(buf));
+    if (IS_ERR_OR_NULL(p) || !su_is_target_dentry_path(p)) return;
 
     // Hide the real su file from unprivileged callers; keep it visible to granted ones.
     if (!granted) {
@@ -593,14 +590,11 @@ static void after_security_file_open(hook_fargs2_t *args, void *udata)
     if ((long)args->ret < 0) return;
 
     struct file *file = (struct file *)args->arg0;
-    if (!file || !su_dentry_path_raw) return;
-
-    struct dentry *dentry = file->f_path.dentry;
-    if (!dentry) return;
+    if (!file || !su_d_path) return;
 
     char buf[PATH_MAX];
-    char *p = su_dentry_path_raw(dentry, buf, sizeof(buf));
-    if (!su_is_target_dentry_path(p)) return;
+    char *p = su_d_path(&file->f_path, buf, sizeof(buf));
+    if (IS_ERR_OR_NULL(p) || !su_is_target_dentry_path(p)) return;
 
     uid_t uid = current_uid();
     if (is_su_allow_uid(uid) || is_trusted_manager_uid(uid)) return;
@@ -723,13 +717,13 @@ static int su_hook_security_file_open(void)
      * getname_flags (which only sees the original spelling) and catches path
      * aliases such as dot-dot components or symlinks to a real su binary.
      */
-    if (!su_dentry_path_raw) {
+    if (!su_d_path) {
         unsigned long dentry_addr = kallsyms_lookup_name_by_suffix("dentry_path_raw");
         if (!dentry_addr) {
-            log_boot("dentry_path_raw not found for security_file_open\n");
+            log_boot("d_path not found for security_file_open\n");
             return -HOOK_BAD_ADDRESS;
         }
-        su_dentry_path_raw = (su_dentry_path_raw_t)dentry_addr;
+        su_d_path = (su_d_path_t)dentry_addr;
     }
 
     unsigned long addr = kallsyms_lookup_name_by_suffix("security_file_open");
@@ -746,32 +740,32 @@ static int su_hook_security_file_open(void)
 
     su_security_file_open_addr = addr;
     su_security_file_open_hooked = true;
-    log_boot("hook security_file_open @ %llx, dentry_path_raw @ %llx rc: 0\n",
-             addr, (uint64_t)su_dentry_path_raw);
+    log_boot("hook security_file_open @ %llx, d_path @ %llx rc: 0\n",
+             addr, (uint64_t)su_d_path);
     return 0;
 }
 
 static int su_hook_security_inode_getattr(void)
 {
-    unsigned long dentry_addr = kallsyms_lookup_name_by_suffix("dentry_path_raw");
-    if (!dentry_addr) {
-        log_boot("dentry_path_raw not found (including compiler suffixes)\n");
+    unsigned long d_path_addr = kallsyms_lookup_name_by_suffix("d_path");
+    if (!d_path_addr) {
+        log_boot("d_path not found (including compiler suffixes)\n");
         return -HOOK_BAD_ADDRESS;
     }
 
-    su_dentry_path_raw = (su_dentry_path_raw_t)dentry_addr;
+    su_d_path = (su_d_path_t)d_path_addr;
 
     unsigned long getattr_addr = kallsyms_lookup_name_by_suffix("security_inode_getattr");
     if (!getattr_addr) {
         log_boot("security_inode_getattr not found (including compiler suffixes)\n");
-        su_dentry_path_raw = 0;
+        su_d_path = 0;
         return -HOOK_BAD_ADDRESS;
     }
 
     hook_err_t rc = hook_wrap1((void *)getattr_addr, 0, after_security_inode_getattr, (void *)0);
     if (rc) {
         log_boot("hook security_inode_getattr @ %llx rc: %d\n", getattr_addr, rc);
-        su_dentry_path_raw = 0;
+        su_d_path = 0;
         return rc;
     }
 
@@ -861,7 +855,7 @@ static void su_unregister_path_probe_hooks(void)
         su_getname_flags_hooked = false;
     }
 
-    su_dentry_path_raw = 0;
+    su_d_path = 0;
 }
 
 void sucompat_init()
