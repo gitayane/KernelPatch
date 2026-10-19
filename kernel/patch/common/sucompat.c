@@ -257,7 +257,7 @@ int su_allow_uid_profile(int is_user, uid_t uid, struct su_profile *out_profile)
      * observed the UID as allowed; never copy a partial profile or accept a
      * record whose embedded UID no longer matches the lookup key.
      */
-    if (ks->dlen < sizeof(struct su_profile) || !ks->data) {
+    if (ks->dlen < sizeof(struct su_profile)) {
         rc = -EINVAL;
         goto out;
     }
@@ -581,10 +581,23 @@ static void after_security_inode_getattr(hook_fargs1_t *args, void *udata)
     }
 }
 
-/* Post-LSM open hook: the path has been resolved to a dentry, which also lets
- * us deny direct opens / execve of a real su file reached via an alternate path
- * spelling. getname_flags handles the common aliases before namei; this is the
- * resolved-path backstop for ungranted callers. */
+/*
+ * The small kernel shim headers intentionally forward-declare struct file.
+ * On Linux 4.4, struct file starts with a union of llist_node and rcu_head,
+ * both pointer-sized pairs on the supported 32/64-bit layouts; f_path follows
+ * that 2-pointer-sized prefix. Mirror only this stable prefix rather than
+ * inventing the remainder of struct file.
+ */
+struct su_file_path_layout {
+    uintptr_t f_u[2];
+    struct {
+        void *mnt;
+        void *dentry;
+    } f_path;
+};
+
+/* Post-LSM open hook: resolve the path from the opened file to catch aliases
+ * such as dot-dot components or symlinks that did not match getname_flags. */
 static void after_security_file_open(hook_fargs2_t *args, void *udata)
 {
     if ((long)args->ret < 0) return;
@@ -592,8 +605,11 @@ static void after_security_file_open(hook_fargs2_t *args, void *udata)
     struct file *file = (struct file *)args->arg0;
     if (!file || !su_d_path) return;
 
+    struct su_file_path_layout *layout = (struct su_file_path_layout *)file;
+    const struct path *path = (const struct path *)&layout->f_path;
+
     char buf[PATH_MAX];
-    char *p = su_d_path(&file->f_path, buf, sizeof(buf));
+    char *p = su_d_path(path, buf, sizeof(buf));
     if (IS_ERR_OR_NULL(p) || !su_is_target_dentry_path(p)) return;
 
     uid_t uid = current_uid();
