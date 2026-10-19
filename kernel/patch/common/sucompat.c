@@ -829,9 +829,32 @@ static void su_register_path_probe_hooks(void)
              su_getname_flags_hooked, su_security_inode_getattr_hooked,
              su_security_file_open_hooked);
 
-    if (su_getname_flags_hooked && su_security_inode_getattr_hooked) {
-        log_boot("shared path probes enabled; legacy fstatat/faccessat probes skipped\n");
+    /*
+     * On the Linux 4.4 target, require security_file_open as well as the
+     * metadata hooks before declaring shared path concealment complete. It
+     * observes the resolved path for file opens, closing the symlink/dot-dot
+     * alias gap that getname_flags alone cannot see.
+     *
+     * The struct file layout shim is intentionally limited to Linux 4.4;
+     * kernels outside that range retain the getname_flags/getattr behavior.
+     */
+    bool resolved_open_required =
+        kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0);
+    bool shared_hooks_ready =
+        su_getname_flags_hooked && su_security_inode_getattr_hooked &&
+        (!resolved_open_required || su_security_file_open_hooked);
+
+    if (shared_hooks_ready) {
+        log_boot("shared path probes enabled: getname_flags=%d inode_getattr=%d file_open=%d; legacy fstatat/faccessat probes skipped\n",
+                 su_getname_flags_hooked, su_security_inode_getattr_hooked,
+                 su_security_file_open_hooked);
         return;
+    }
+
+    if (resolved_open_required && !su_security_file_open_hooked) {
+        log_boot("WARNING: resolved-open SU alias concealment unavailable; retaining legacy fstatat/faccessat probes\n");
+    } else {
+        log_boot("shared path probes incomplete; retaining legacy fstatat/faccessat probes\n");
     }
 
     /* Legacy per-syscall fallback. */
