@@ -154,12 +154,23 @@ KP_EXPORT_SYMBOL(is_su_allow_uid);
 int su_add_allow_uid(uid_t uid, uid_t to_uid, const char *scontext)
 {
     if (!scontext) scontext = "";
+
     struct su_profile profile = {
-        uid,
-        to_uid,
+        .uid = uid,
+        .to_uid = to_uid,
     };
-    memcpy(profile.scontext, scontext, SUPERCALL_SCONTEXT_LEN);
-    int rc = write_kstorage(su_kstorage_gid, uid, &profile, 0, sizeof(struct su_profile), false);
+
+    /*
+     * scontext is supplied by kernel-side callers and may be a short string
+     * literal. Copy only its actual bytes plus the terminator; the previous
+     * fixed-size memcpy could read beyond the source object. The zero-initialized
+     * profile keeps the unused tail deterministic for storage and comparisons.
+     */
+    size_t sctx_len = strnlen(scontext, sizeof(profile.scontext));
+    if (sctx_len >= sizeof(profile.scontext)) return -E2BIG;
+    memcpy(profile.scontext, scontext, sctx_len + 1);
+
+    int rc = write_kstorage(su_kstorage_gid, uid, &profile, 0, sizeof(profile), false);
     logkfd("uid: %d, to_uid: %d, rc: %d\n", uid, to_uid, rc);
     return rc;
 }
@@ -228,22 +239,40 @@ int su_allow_uid_profile(int is_user, uid_t uid, struct su_profile *out_profile)
 {
     int rc = 0;
 
+    if (!out_profile) return -EINVAL;
+
     rcu_read_lock();
     const struct kstorage *ks = get_kstorage(su_kstorage_gid, uid);
-    if (IS_ERR(ks)) {
+    if (IS_ERR_OR_NULL(ks)) {
         rc = -ENOENT;
         goto out;
     }
-    struct su_profile *profile = (struct su_profile *)ks->data;
+
+    /*
+     * Treat a malformed or stale record as absent. The lookup is protected by
+     * RCU, but grant/revoke operations can race with a caller that previously
+     * observed the UID as allowed; never copy a partial profile or accept a
+     * record whose embedded UID no longer matches the lookup key.
+     */
+    if (ks->dlen < sizeof(struct su_profile) || !ks->data) {
+        rc = -EINVAL;
+        goto out;
+    }
+
+    const struct su_profile *profile = (const struct su_profile *)ks->data;
+    if (profile->uid != uid) {
+        rc = -ENOENT;
+        goto out;
+    }
 
     if (is_user) {
-        rc = compat_copy_to_user(out_profile, profile, sizeof(struct su_profile));
+        rc = compat_copy_to_user(out_profile, (void *)profile, sizeof(*profile));
         if (rc <= 0) {
             logkfd("compat_copy_to_user error: %d", rc);
             goto out;
         }
     } else {
-        memcpy(out_profile, profile, sizeof(struct su_profile));
+        memcpy(out_profile, profile, sizeof(*profile));
     }
 
 out:
