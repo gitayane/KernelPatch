@@ -729,6 +729,18 @@ static int su_hook_getname_flags(void)
 static int su_hook_security_file_open(void)
 {
     /*
+     * This shim models the Linux 4.4 struct file prefix. Newer kernels may
+     * reorder struct file (some builds enable __randomize_layout), so never
+     * dereference this layout there. Keep the resolved-open backstop scoped to
+     * the XZP 4.4 target; other kernels retain the upstream path/getattr hooks.
+     */
+    if (kver < VERSION(4, 4, 0) || kver >= VERSION(4, 5, 0)) {
+        log_boot("security_file_open SU path check skipped: file layout shim is Linux 4.4-specific (kver=%x)\n",
+                 kver);
+        return -EOPNOTSUPP;
+    }
+
+    /*
      * security_file_open sees the resolved file path, so it complements
      * getname_flags (which only sees the original spelling) and catches path
      * aliases such as dot-dot components or symlinks to a real su binary.
