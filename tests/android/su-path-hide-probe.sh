@@ -95,6 +95,20 @@ probe_hidden() {
 probe_hidden "direct path" "$TARGET"
 probe_hidden "dot-dot alias" "/system/bin/../bin/su"
 probe_hidden "duplicate-slash alias" "//system//bin/su"
+probe_hidden "dot-component alias" "/system/bin/./su"
+
+# A relative path bypasses the literal spelling checks in getname_flags;
+# resolved inode/open hooks should still conceal the same underlying file.
+saved_dir="$(pwd)"
+if cd /system/bin 2>/dev/null; then
+    probe_hidden "relative path" "./su"
+    if ! cd "$saved_dir"; then
+        echo "ERROR: cannot restore the original working directory: $saved_dir"
+        exit 2
+    fi
+else
+    fail "cannot enter /system/bin to test the relative path alias"
+fi
 
 if ln -s "$TARGET" "$test_dir/su-link" 2>/dev/null; then
     probe_hidden "symlink alias" "$test_dir/su-link"
