@@ -50,7 +50,8 @@ probe_hidden() {
     echo
     echo "[$label] $path"
 
-    "$TOYBOX" stat -c '%n %s' "$path" >/dev/null 2>&1
+    # Follow symlinks so this tests the target's metadata, not the link itself.
+    "$TOYBOX" stat -L -c '%n %s' "$path" >/dev/null 2>&1
     rc=$?
     if [ "$rc" -ne 0 ]; then
         pass "$label: stat does not expose the file"
