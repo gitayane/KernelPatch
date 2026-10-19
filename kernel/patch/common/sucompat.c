@@ -758,14 +758,12 @@ static int su_hook_security_inode_getattr(void)
     unsigned long getattr_addr = kallsyms_lookup_name_by_suffix("security_inode_getattr");
     if (!getattr_addr) {
         log_boot("security_inode_getattr not found (including compiler suffixes)\n");
-        su_d_path = 0;
         return -HOOK_BAD_ADDRESS;
     }
 
     hook_err_t rc = hook_wrap1((void *)getattr_addr, 0, after_security_inode_getattr, (void *)0);
     if (rc) {
         log_boot("hook security_inode_getattr @ %llx rc: %d\n", getattr_addr, rc);
-        su_d_path = 0;
         return rc;
     }
 
