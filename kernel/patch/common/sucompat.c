@@ -718,12 +718,12 @@ static int su_hook_security_file_open(void)
      * aliases such as dot-dot components or symlinks to a real su binary.
      */
     if (!su_d_path) {
-        unsigned long dentry_addr = kallsyms_lookup_name_by_suffix("dentry_path_raw");
-        if (!dentry_addr) {
+        unsigned long d_path_addr = kallsyms_lookup_name_by_suffix("d_path");
+        if (!d_path_addr) {
             log_boot("d_path not found for security_file_open\n");
             return -HOOK_BAD_ADDRESS;
         }
-        su_d_path = (su_d_path_t)dentry_addr;
+        su_d_path = (su_d_path_t)d_path_addr;
     }
 
     unsigned long addr = kallsyms_lookup_name_by_suffix("security_file_open");
@@ -771,8 +771,8 @@ static int su_hook_security_inode_getattr(void)
 
     su_security_inode_getattr_addr = getattr_addr;
     su_security_inode_getattr_hooked = true;
-    log_boot("hook security_inode_getattr @ %llx, dentry_path_raw @ %llx rc: 0\n",
-             getattr_addr, dentry_addr);
+    log_boot("hook security_inode_getattr @ %llx, d_path @ %llx rc: 0\n",
+             getattr_addr, d_path_addr);
     return 0;
 }
 
@@ -786,7 +786,7 @@ static void su_register_path_probe_hooks(void)
     /*
      * Prefer the shared upstream path-observation hooks. On this 4.4 kernel
      * getname_flags() and security_inode_getattr() are real VFS entry points,
-     * and dentry_path_raw() lets the getattr hook identify a real su dentry.
+     * and d_path() lets the getattr/open hooks identify the resolved absolute path.
      *
      * If either hook cannot be resolved/installed, keep the legacy syscall
      * probes below as a conservative fallback rather than silently disabling
