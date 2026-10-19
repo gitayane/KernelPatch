@@ -481,38 +481,53 @@ __maybe_unused static void su_handler_arg1_ufilename_before(hook_fargs6_t *args,
     }
 }
 
+#ifdef ANDROID
+/*
+ * A path that cannot identify a real su binary. /system is read-only for app
+ * UIDs, so an untrusted caller cannot create this sentinel to defeat the hide.
+ * Keep it shorter than both default aliases so the common path can be rewritten
+ * in-place without allocating another struct filename.
+ */
+static const char hidden_su_path[] = "/system/.kp";
+#endif
+
 static void after_getname_flags(hook_fargs3_t *args, void *udata)
 {
     struct filename *fn = (struct filename *)args->ret;
     if (IS_ERR_OR_NULL(fn)) return;
-
-    uid_t uid = current_uid();
-    if (!is_su_allow_uid(uid) && !is_trusted_manager_uid(uid)) return;
 
     const char *name = fn->name;
     if (!name) return;
 
 #ifdef ANDROID
     /*
-     * Keep the VFS path hook consistent with the syscall fallback and execve
-     * compatibility path: granted callers should see a usable shell through
-     * both the configured KP path (/system/bin/kp by default) and the legacy
-     * /system/bin/su path. When both VFS hooks are installed, the legacy
-     * fstatat/faccessat fallback is intentionally skipped, so this check must
-     * cover both names here.
+     * The VFS hook must hide a real su file from ungranted callers as well as
+     * presenting a shell-compatible alias to granted callers. Do the cheap path
+     * comparison first, so unrelated path lookups do not walk the SU allowlist.
+     * This hook also covers execve path resolution, which the globally gated
+     * syscall callbacks intentionally skip for ungranted UIDs.
      */
     if (strcmp(name, su_get_path()) && strcmp(name, legacy_su_path)) return;
+
+    uid_t uid = current_uid();
+    const char *target_path =
+        (is_su_allow_uid(uid) || is_trusted_manager_uid(uid))
+            ? sh_path : hidden_su_path;
 #else
     if (strcmp(name, su_get_path())) return;
+
+    uid_t uid = current_uid();
+    if (!is_su_allow_uid(uid) && !is_trusted_manager_uid(uid)) return;
+    const char *target_path = sh_path;
 #endif
 
-    if (strlen(sh_path) <= strlen(name)) {
-        strcpy((char *)name, sh_path);
+    if (strlen(target_path) <= strlen(name)) {
+        strcpy((char *)name, target_path);
         return;
     }
 
     if (kfunc(getname_kernel) && kfunc(putname)) {
-        struct filename *nf = kfunc(getname_kernel)(sh_path);
+        struct filename *nf = kfunc(getname_kernel)(target_path);
         if (!IS_ERR_OR_NULL(nf)) {
             kfunc(putname)(fn);
             args->ret = (uint64_t)nf;
@@ -520,7 +535,7 @@ static void after_getname_flags(hook_fargs3_t *args, void *udata)
         }
     }
 
-    logkfi("uid: %d, cannot redirect su path to %s\n", uid, sh_path);
+    logkfi("uid: %d, cannot redirect su path to %s\n", uid, target_path);
 }
 
 // stat-class probes on a real third-party su binary: security_inode_getattr fires
