@@ -98,6 +98,13 @@ probe_hidden "duplicate-slash alias" "//system//bin/su"
 
 if ln -s "$TARGET" "$test_dir/su-link" 2>/dev/null; then
     probe_hidden "symlink alias" "$test_dir/su-link"
+
+    # Follow a second symlink hop to catch chained-alias regressions.
+    if ln -s "$test_dir/su-link" "$test_dir/su-link-chain" 2>/dev/null; then
+        probe_hidden "chained symlink alias" "$test_dir/su-link-chain"
+    else
+        fail "could not create chained symlink in Termux private storage"
+    fi
 else
     fail "could not create symlink in Termux private storage"
 fi
