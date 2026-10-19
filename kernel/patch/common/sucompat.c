@@ -588,7 +588,7 @@ static void after_security_inode_getattr(hook_fargs1_t *args, void *udata)
  * us deny direct opens / execve of a real su file reached via an alternate path
  * spelling. getname_flags handles the common aliases before namei; this is the
  * resolved-path backstop for ungranted callers. */
-static void after_security_file_open(hook_fargs1_t *args, void *udata)
+static void after_security_file_open(hook_fargs2_t *args, void *udata)
 {
     if ((long)args->ret < 0) return;
 
@@ -738,7 +738,7 @@ static int su_hook_security_file_open(void)
         return -HOOK_BAD_ADDRESS;
     }
 
-    hook_err_t rc = hook_wrap1((void *)addr, 0, after_security_file_open, (void *)0);
+    hook_err_t rc = hook_wrap2((void *)addr, 0, after_security_file_open, (void *)0);
     if (rc) {
         log_boot("hook security_file_open @ %llx rc: %d\n", addr, rc);
         return rc;
