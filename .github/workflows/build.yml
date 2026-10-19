@@ -342,6 +342,35 @@ jobs:
           mv kpimg kpimg-android-dispatcher-test
           mv kpimg.elf kpimg.elf-android-dispatcher-test
           make clean
+
+          # Regression test: a live dispatcher with the historical unsafe
+          # three-word trace-site patch must fail at compile time. Require the
+          # exact guard diagnostic so an unrelated build failure cannot pass.
+          if make hdr kpimg \
+            KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=1 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY=0 \
+            KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY=0 \
+            > /tmp/kp-unsafe-dispatcher-build.log 2>&1; then
+            cat /tmp/kp-unsafe-dispatcher-build.log
+            echo "::error::Unsafe Linux 4.4 live dispatcher config unexpectedly compiled"
+            exit 1
+          fi
+          if ! grep -Fq "Live Linux 4.4 dispatcher requires TRACE_BYPASS=1" /tmp/kp-unsafe-dispatcher-build.log; then
+            cat /tmp/kp-unsafe-dispatcher-build.log
+            echo "::error::Unsafe dispatcher compile failed without the expected compile-time guard"
+            exit 1
+          fi
+          echo "::notice::Confirmed unsafe live dispatcher config is rejected by the compile-time guard"
+          make clean
           unset ANDROID
 
           cd ..
