@@ -74,7 +74,25 @@ static unsigned long su_security_file_open_addr;
 static bool su_getname_flags_hooked;
 static bool su_security_inode_getattr_hooked;
 static bool su_security_file_open_hooked;
-static bool su_legacy_path_hooks_registered;
+static bool su_legacy_fstatat_hooked;
+static bool su_legacy_faccessat_hooked;
+static bool su_legacy_compat_fstatat64_hooked;
+static bool su_legacy_compat_faccessat_hooked;
+
+static bool su_path_probe_hooks_any_registered(void)
+{
+    return su_getname_flags_hooked || su_security_inode_getattr_hooked ||
+           su_security_file_open_hooked || su_legacy_fstatat_hooked ||
+           su_legacy_faccessat_hooked || su_legacy_compat_fstatat64_hooked ||
+           su_legacy_compat_faccessat_hooked;
+}
+
+static bool su_hook_result_is_registered(hook_err_t rc)
+{
+    /* A duplicate means the same callback is already present in this hook chain. */
+    return rc == HOOK_NO_ERR || rc == -HOOK_DUPLICATED;
+}
+
 long kp_control_feature_sc(const char __user *uname, int state)
 {
     char name[64];
@@ -88,8 +106,8 @@ long kp_control_feature_sc(const char __user *uname, int state)
 
     if (!strcmp(name, "sucompat_extra") || !strcmp(name, "path_probe")) {
         if (state < 0)
-            /* Query: check if the hooks are currently registered. */
-            return 0;   /* not tracked */
+            /* Query: report whether at least one path-probe hook is registered. */
+            return su_path_probe_hooks_any_registered() ? 1 : 0;
         if (state)
             su_register_path_probe_hooks();
         else
@@ -810,13 +828,22 @@ static int su_hook_security_inode_getattr(void)
  */
 static void su_unregister_legacy_path_probe_hooks(void)
 {
-    if (!su_legacy_path_hooks_registered) return;
-
-    unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
-    unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
-    unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
-    unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
-    su_legacy_path_hooks_registered = false;
+    if (su_legacy_fstatat_hooked) {
+        unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
+        su_legacy_fstatat_hooked = false;
+    }
+    if (su_legacy_faccessat_hooked) {
+        unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
+        su_legacy_faccessat_hooked = false;
+    }
+    if (su_legacy_compat_fstatat64_hooked) {
+        unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
+        su_legacy_compat_fstatat64_hooked = false;
+    }
+    if (su_legacy_compat_faccessat_hooked) {
+        unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
+        su_legacy_compat_faccessat_hooked = false;
+    }
 }
 
 static void su_register_path_probe_hooks(void)
@@ -878,20 +905,35 @@ static void su_register_path_probe_hooks(void)
     /* Legacy per-syscall fallback. */
     void *gated = syscall_hook_global_enabled() ? (void *)1 : (void *)0;
 
-    rc = hook_syscalln(__NR3264_fstatat, 4, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("legacy hook __NR3264_fstatat rc: %d\n", rc);
+    if (!su_legacy_fstatat_hooked) {
+        rc = hook_syscalln(__NR3264_fstatat, 4, su_handler_arg1_ufilename_before, 0, gated);
+        su_legacy_fstatat_hooked = su_hook_result_is_registered(rc);
+        log_boot("legacy hook __NR3264_fstatat rc: %d registered=%d\n", rc,
+                 su_legacy_fstatat_hooked);
+    }
 
-    rc = hook_syscalln(__NR_faccessat, 3, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("legacy hook __NR_faccessat rc: %d\n", rc);
+    if (!su_legacy_faccessat_hooked) {
+        rc = hook_syscalln(__NR_faccessat, 3, su_handler_arg1_ufilename_before, 0, gated);
+        su_legacy_faccessat_hooked = su_hook_result_is_registered(rc);
+        log_boot("legacy hook __NR_faccessat rc: %d registered=%d\n", rc,
+                 su_legacy_faccessat_hooked);
+    }
 
     /* 32-bit compat probes: fstatat64(327) / faccessat(334). */
-    rc = hook_compat_syscalln(327, 4, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("legacy hook 32 __NR_fstatat64 rc: %d\n", rc);
+    if (!su_legacy_compat_fstatat64_hooked) {
+        rc = hook_compat_syscalln(327, 4, su_handler_arg1_ufilename_before, 0, gated);
+        su_legacy_compat_fstatat64_hooked = su_hook_result_is_registered(rc);
+        log_boot("legacy hook 32 __NR_fstatat64 rc: %d registered=%d\n", rc,
+                 su_legacy_compat_fstatat64_hooked);
+    }
 
-    rc = hook_compat_syscalln(334, 3, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("legacy hook 32 __NR_faccessat rc: %d\n", rc);
+    if (!su_legacy_compat_faccessat_hooked) {
+        rc = hook_compat_syscalln(334, 3, su_handler_arg1_ufilename_before, 0, gated);
+        su_legacy_compat_faccessat_hooked = su_hook_result_is_registered(rc);
+        log_boot("legacy hook 32 __NR_faccessat rc: %d registered=%d\n", rc,
+                 su_legacy_compat_faccessat_hooked);
+    }
 
-    su_legacy_path_hooks_registered = true;
 }
 
 static void su_unregister_path_probe_hooks(void)
