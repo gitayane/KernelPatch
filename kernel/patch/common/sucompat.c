@@ -108,10 +108,15 @@ long kp_control_feature_sc(const char __user *uname, int state)
         if (state < 0)
             /* Query: report whether at least one path-probe hook is registered. */
             return su_path_probe_hooks_any_registered() ? 1 : 0;
-        if (state)
+        if (state) {
             su_register_path_probe_hooks();
-        else
+            if (!su_path_probe_hooks_any_registered()) {
+                log_boot("ERROR: path-probe enable requested but no hooks were registered\\n");
+                return -ENODEV;
+            }
+        } else {
             su_unregister_path_probe_hooks();
+        }
         logkfi("sucompat_extra %s via supercall\n",
                state ? "enabled" : "disabled");
         return 0;
