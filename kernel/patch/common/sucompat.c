@@ -802,6 +802,23 @@ static int su_hook_security_inode_getattr(void)
     return 0;
 }
 
+/*
+ * Remove the legacy per-syscall fallback once the shared path hooks are ready.
+ * Registration can be retried after a partial hook failure; without this cleanup,
+ * a later successful retry would leave both mechanisms active until an explicit
+ * disable, adding redundant callbacks and making registration state misleading.
+ */
+static void su_unregister_legacy_path_probe_hooks(void)
+{
+    if (!su_legacy_path_hooks_registered) return;
+
+    unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
+    unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
+    unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
+    unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
+    su_legacy_path_hooks_registered = false;
+}
+
 static void su_register_path_probe_hooks(void)
 {
 #ifdef ANDROID
@@ -845,6 +862,7 @@ static void su_register_path_probe_hooks(void)
         (!resolved_open_required || su_security_file_open_hooked);
 
     if (shared_hooks_ready) {
+        su_unregister_legacy_path_probe_hooks();
         log_boot("shared path probes enabled: getname_flags=%d inode_getattr=%d file_open=%d; legacy fstatat/faccessat probes skipped\n",
                  su_getname_flags_hooked, su_security_inode_getattr_hooked,
                  su_security_file_open_hooked);
@@ -878,13 +896,7 @@ static void su_register_path_probe_hooks(void)
 
 static void su_unregister_path_probe_hooks(void)
 {
-    if (su_legacy_path_hooks_registered) {
-        unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
-        unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
-        unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
-        unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
-        su_legacy_path_hooks_registered = false;
-    }
+    su_unregister_legacy_path_probe_hooks();
 
     if (su_security_file_open_hooked) {
         hook_unwrap((void *)su_security_file_open_addr, 0, after_security_file_open);
