@@ -916,7 +916,12 @@ static void su_unregister_path_probe_hooks(void)
         su_getname_flags_hooked = false;
     }
 
-    su_d_path = 0;
+    /*
+     * Keep the resolved d_path address cached. hook_unwrap() removes callbacks
+     * but does not wait for already-running callbacks to drain; clearing this
+     * pointer here could race with an in-flight callback that is about to call
+     * d_path(). The kernel symbol remains valid while KernelPatch is resident.
+     */
 }
 
 void sucompat_init()
