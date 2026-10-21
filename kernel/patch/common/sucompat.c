@@ -124,7 +124,7 @@ long kp_control_feature_sc(const char __user *uname, int state)
         if (state) {
             int rc = su_register_path_probe_hooks();
             if (rc < 0) {
-                log_boot("ERROR: path-probe enable did not achieve required coverage rc=%d\\n", rc);
+                log_boot("ERROR: path-probe enable did not achieve required coverage rc=%d\n", rc);
                 return rc;
             }
         } else {
@@ -868,7 +868,7 @@ static int su_register_path_probe_hooks(void)
 {
 #ifdef ANDROID
     if (unlikely(android_is_safe_mode)) {
-        log_boot("ERROR: path-probe registration skipped in safe mode\\n");
+        log_boot("ERROR: path-probe registration skipped in safe mode\n");
         return -EPERM;
     }
 #endif
@@ -905,12 +905,14 @@ static int su_register_path_probe_hooks(void)
      */
     if (su_path_probe_shared_hooks_ready()) {
         su_unregister_legacy_path_probe_hooks();
-        log_boot("shared path probes enabled: getname_flags=%d inode_getattr=%d file_open=%d; legacy fstatat/faccessat probes skipped\\n",
+        log_boot("shared path probes enabled: getname_flags=%d inode_getattr=%d file_open=%d; legacy fstatat/faccessat probes skipped\n",
                  su_getname_flags_hooked, su_security_inode_getattr_hooked,
                  su_security_file_open_hooked);
         return 0;
     }
 
+    bool resolved_open_required =
+        kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0);
     if (resolved_open_required && !su_security_file_open_hooked) {
         log_boot("WARNING: resolved-open SU alias concealment unavailable; retaining legacy fstatat/faccessat probes\n");
     } else {
@@ -954,7 +956,7 @@ static int su_register_path_probe_hooks(void)
      * replace the shared VFS coverage. Do not report enable success unless all
      * shared hooks required by this kernel are ready.
      */
-    log_boot("ERROR: path-probe coverage incomplete; shared hooks are not ready (registered_any=%d); legacy fallbacks may remain active\\n",
+    log_boot("ERROR: path-probe coverage incomplete; shared hooks are not ready (registered_any=%d); legacy fallbacks may remain active\n",
              su_path_probe_hooks_any_registered());
     return -ENODEV;
 }
