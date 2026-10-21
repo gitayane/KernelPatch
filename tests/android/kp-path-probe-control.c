@@ -89,7 +89,7 @@ int main(int argc, char **argv)
 #endif
 
     if (argc != 2) {
-        fprintf(stderr, "Usage: %s query|disable|enable|trace-query|trace-off|trace-on\\n", argv[0]);
+        fprintf(stderr, "Usage: %s query|disable|enable|trace-query|trace-off|trace-on\n", argv[0]);
         return 2;
     }
 
@@ -115,7 +115,7 @@ int main(int argc, char **argv)
         trace_op = 1;
         feature_name = "path_probe_trace";
     } else {
-        fprintf(stderr, "Unknown operation: %s\\n", argv[1]);
+        fprintf(stderr, "Unknown operation: %s\n", argv[1]);
         return 2;
     }
 

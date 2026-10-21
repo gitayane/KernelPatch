@@ -122,12 +122,12 @@ static void su_log_untrusted_path_redirect(uid_t uid, const char *source, const 
     u32 n = __atomic_fetch_add(&su_path_probe_trace_count, 1, __ATOMIC_RELAXED);
     if (n >= SU_PATH_PROBE_TRACE_MAX) {
         if (n == SU_PATH_PROBE_TRACE_MAX)
-            logkfi("path-probe trace: rate limit reached (%u records)\\n",
+            logkfi("path-probe trace: rate limit reached (%u records)\n",
                    SU_PATH_PROBE_TRACE_MAX);
         return;
     }
 
-    logkfi("path-probe trace: ungranted uid=%d source=%s target=%s sample=%u/%u\\n",
+    logkfi("path-probe trace: ungranted uid=%d source=%s target=%s sample=%u/%u\n",
            uid, source, target, n + 1, SU_PATH_PROBE_TRACE_MAX);
 }
 
@@ -151,7 +151,7 @@ long kp_control_feature_sc(const char __user *uname, int state)
         } else {
             __atomic_store_n(&su_path_probe_trace_enabled, false, __ATOMIC_RELAXED);
         }
-        logkfi("path-probe trace %s via supercall\\n", state ? "enabled" : "disabled");
+        logkfi("path-probe trace %s via supercall\n", state ? "enabled" : "disabled");
         return 0;
     }
 
