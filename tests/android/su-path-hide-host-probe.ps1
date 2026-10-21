@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Host-side positive control for tests/android/su-path-hide-probe.sh.
+# First query the configured path from Termux with su-path-config-query.c.
 # Run from Windows PowerShell while path_probe is enabled:
-#   .\tests\android\su-path-hide-host-probe.ps1 -Serial CB512EEFAC
+#   .\tests\android\su-path-hide-host-probe.ps1 -Serial CB512EEFAC -ActivePath /system/bin/su
 #
 # The ordinary Termux probe checks that an untrusted UID cannot see or use the
 # virtual aliases. Those negative checks can also pass when the path is absent
@@ -15,7 +16,11 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$Serial
+    [string]$Serial,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('/system/bin/kp', '/system/bin/su')]
+    [string]$ActivePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -59,7 +64,11 @@ if ($reference.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($reference.Output
 }
 
 $failed = $false
-foreach ($alias in @('/system/bin/kp', '/system/bin/su')) {
+# The configured active path and the legacy /system/bin/su alias should be
+# redirected for an authorized caller. Do not assume /system/bin/kp is active:
+# APatch/KP can reset the configured path at runtime.
+$aliases = @($ActivePath, '/system/bin/su') | Select-Object -Unique
+foreach ($alias in $aliases) {
     $actual = Get-RootStat -Path $alias
 
     if ($actual.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($actual.Output)) {
@@ -84,5 +93,5 @@ if ($failed) {
     exit 1
 }
 
-Write-Host 'RESULT: PASS=2 FAIL=0 (authorized positive controls only)'
+Write-Host "RESULT: PASS=$($aliases.Count) FAIL=0 (authorized positive controls only; active=$ActivePath)"
 exit 0
