@@ -55,7 +55,7 @@ static const char *current_su_path = 0;
 
 static int su_kstorage_gid = -1;
 static int exclude_kstorage_gid = -1;
-static void su_register_path_probe_hooks(void);
+static int su_register_path_probe_hooks(void);
 static void su_unregister_path_probe_hooks(void);
 static int su_hook_getname_flags(void);
 static int su_hook_security_inode_getattr(void);
@@ -87,6 +87,19 @@ static bool su_path_probe_hooks_any_registered(void)
            su_legacy_compat_faccessat_hooked;
 }
 
+static bool su_path_probe_shared_hooks_ready(void)
+{
+    /*
+     * Linux 4.4 also needs the resolved-open hook: getname_flags sees the
+     * original spelling, while inode_getattr alone cannot block every open.
+     */
+    bool resolved_open_required =
+        kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0);
+
+    return su_getname_flags_hooked && su_security_inode_getattr_hooked &&
+           (!resolved_open_required || su_security_file_open_hooked);
+}
+
 static bool su_hook_result_is_registered(hook_err_t rc)
 {
     /* A duplicate means the same callback is already present in this hook chain. */
@@ -109,10 +122,10 @@ long kp_control_feature_sc(const char __user *uname, int state)
             /* Query: report whether at least one path-probe hook is registered. */
             return su_path_probe_hooks_any_registered() ? 1 : 0;
         if (state) {
-            su_register_path_probe_hooks();
-            if (!su_path_probe_hooks_any_registered()) {
-                log_boot("ERROR: path-probe enable requested but no hooks were registered\\n");
-                return -ENODEV;
+            int rc = su_register_path_probe_hooks();
+            if (rc < 0) {
+                log_boot("ERROR: path-probe enable did not achieve required coverage rc=%d\\n", rc);
+                return rc;
             }
         } else {
             su_unregister_path_probe_hooks();
@@ -851,10 +864,13 @@ static void su_unregister_legacy_path_probe_hooks(void)
     }
 }
 
-static void su_register_path_probe_hooks(void)
+static int su_register_path_probe_hooks(void)
 {
 #ifdef ANDROID
-    if (unlikely(android_is_safe_mode)) return;
+    if (unlikely(android_is_safe_mode)) {
+        log_boot("ERROR: path-probe registration skipped in safe mode\\n");
+        return -EPERM;
+    }
 #endif
     hook_err_t rc;
 
@@ -887,18 +903,12 @@ static void su_register_path_probe_hooks(void)
      * The struct file layout shim is intentionally limited to Linux 4.4;
      * kernels outside that range retain the getname_flags/getattr behavior.
      */
-    bool resolved_open_required =
-        kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0);
-    bool shared_hooks_ready =
-        su_getname_flags_hooked && su_security_inode_getattr_hooked &&
-        (!resolved_open_required || su_security_file_open_hooked);
-
-    if (shared_hooks_ready) {
+    if (su_path_probe_shared_hooks_ready()) {
         su_unregister_legacy_path_probe_hooks();
-        log_boot("shared path probes enabled: getname_flags=%d inode_getattr=%d file_open=%d; legacy fstatat/faccessat probes skipped\n",
+        log_boot("shared path probes enabled: getname_flags=%d inode_getattr=%d file_open=%d; legacy fstatat/faccessat probes skipped\\n",
                  su_getname_flags_hooked, su_security_inode_getattr_hooked,
                  su_security_file_open_hooked);
-        return;
+        return 0;
     }
 
     if (resolved_open_required && !su_security_file_open_hooked) {
@@ -939,6 +949,14 @@ static void su_register_path_probe_hooks(void)
                  su_legacy_compat_faccessat_hooked);
     }
 
+    /*
+     * Legacy probes are retained as a degraded fallback, but they do not
+     * replace the shared VFS coverage. Do not report enable success unless all
+     * shared hooks required by this kernel are ready.
+     */
+    log_boot("ERROR: path-probe coverage incomplete; shared hooks are not ready (registered_any=%d); legacy fallbacks may remain active\\n",
+             su_path_probe_hooks_any_registered());
+    return -ENODEV;
 }
 
 static void su_unregister_path_probe_hooks(void)
