@@ -118,9 +118,15 @@ long kp_control_feature_sc(const char __user *uname, int state)
     }
 
     if (!strcmp(name, "sucompat_extra") || !strcmp(name, "path_probe")) {
-        if (state < 0)
-            /* Query: report whether at least one path-probe hook is registered. */
-            return su_path_probe_hooks_any_registered() ? 1 : 0;
+        if (state < 0) {
+            /*
+             * Query states: 0=no tracked hooks, 1=required shared coverage
+             * ready, 2=partial/degraded hooks registered.
+             */
+            if (su_path_probe_shared_hooks_ready())
+                return 1;
+            return su_path_probe_hooks_any_registered() ? 2 : 0;
+        }
         if (state) {
             int rc = su_register_path_probe_hooks();
             if (rc < 0) {
