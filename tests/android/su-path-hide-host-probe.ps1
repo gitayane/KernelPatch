@@ -30,8 +30,18 @@ function Get-RootStat {
     # The format contains no spaces or shell metacharacters, so it stays
     # unquoted in the remote command and survives PowerShell/adb shell parsing.
     $remoteCommand = "/system/bin/toybox stat -L -c %d:%i:%s:%a $Path"
-    $output = & adb -s $Serial shell su -c $remoteCommand 2>&1
-    $exitCode = $LASTEXITCODE
+    # Remote stat failures are expected test results, not PowerShell script
+    # exceptions. Temporarily prevent native stderr from terminating the script
+    # so it can report the adb exit code and continue checking the other alias.
+    $savedPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & adb -s $Serial shell su -c $remoteCommand 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedPreference
+    }
     $text = (($output | ForEach-Object { "$_" }) -join "`n").Trim()
 
     return [pscustomobject]@{
