@@ -7,6 +7,10 @@
 #
 # Precondition: while adb shell is allowed to use root, verify that
 # /system/bin/su -v succeeds. Do not run this script through su or adb shell.
+#
+# Important: pair this with tests/android/su-path-hide-host-probe.ps1 from
+# Windows PowerShell. These negative checks can also pass if the target path is
+# already absent; the host probe provides the authorized positive control.
 
 TOYBOX=/system/bin/toybox
 TARGET=/system/bin/su
