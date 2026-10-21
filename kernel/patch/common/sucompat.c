@@ -106,6 +106,31 @@ static bool su_hook_result_is_registered(hook_err_t rc)
     return rc == HOOK_NO_ERR || rc == -HOOK_DUPLICATED;
 }
 
+/*
+ * Opt-in, bounded diagnostics for proving that the ungranted path rewrite runs.
+ * Disabled by default so normal operation adds no logging noise.
+ */
+#define SU_PATH_PROBE_TRACE_MAX 32
+static bool su_path_probe_trace_enabled;
+static u32 su_path_probe_trace_count;
+
+static void su_log_untrusted_path_redirect(uid_t uid, const char *source, const char *target)
+{
+    if (!__atomic_load_n(&su_path_probe_trace_enabled, __ATOMIC_RELAXED))
+        return;
+
+    u32 n = __atomic_fetch_add(&su_path_probe_trace_count, 1, __ATOMIC_RELAXED);
+    if (n >= SU_PATH_PROBE_TRACE_MAX) {
+        if (n == SU_PATH_PROBE_TRACE_MAX)
+            logkfi("path-probe trace: rate limit reached (%u records)\\n",
+                   SU_PATH_PROBE_TRACE_MAX);
+        return;
+    }
+
+    logkfi("path-probe trace: ungranted uid=%d source=%s target=%s sample=%u/%u\\n",
+           uid, source, target, n + 1, SU_PATH_PROBE_TRACE_MAX);
+}
+
 long kp_control_feature_sc(const char __user *uname, int state)
 {
     char name[64];
@@ -115,6 +140,19 @@ long kp_control_feature_sc(const char __user *uname, int state)
 
     if (!strcmp(name, "selinux_hide")) {
         return selinux_hide_control(state);
+    }
+
+    if (!strcmp(name, "path_probe_trace")) {
+        if (state < 0)
+            return __atomic_load_n(&su_path_probe_trace_enabled, __ATOMIC_RELAXED) ? 1 : 0;
+        if (state) {
+            __atomic_store_n(&su_path_probe_trace_count, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&su_path_probe_trace_enabled, true, __ATOMIC_RELAXED);
+        } else {
+            __atomic_store_n(&su_path_probe_trace_enabled, false, __ATOMIC_RELAXED);
+        }
+        logkfi("path-probe trace %s via supercall\\n", state ? "enabled" : "disabled");
+        return 0;
     }
 
     if (!strcmp(name, "sucompat_extra") || !strcmp(name, "path_probe")) {
@@ -544,6 +582,7 @@ static void after_getname_flags(hook_fargs3_t *args, void *udata)
     const char *name = fn->name;
     if (!name) return;
 
+    bool trace_untrusted_redirect = false;
 #ifdef ANDROID
     /*
      * The VFS hook must hide a real su file from ungranted callers as well as
@@ -555,9 +594,9 @@ static void after_getname_flags(hook_fargs3_t *args, void *udata)
     if (strcmp(name, su_get_path()) && strcmp(name, legacy_su_path)) return;
 
     uid_t uid = current_uid();
-    const char *target_path =
-        (is_su_allow_uid(uid) || is_trusted_manager_uid(uid))
-            ? sh_path : hidden_su_path;
+    bool granted = is_su_allow_uid(uid) || is_trusted_manager_uid(uid);
+    const char *target_path = granted ? sh_path : hidden_su_path;
+    trace_untrusted_redirect = !granted;
 #else
     if (strcmp(name, su_get_path())) return;
 
@@ -567,6 +606,8 @@ static void after_getname_flags(hook_fargs3_t *args, void *udata)
 #endif
 
     if (strlen(target_path) <= strlen(name)) {
+        if (trace_untrusted_redirect)
+            su_log_untrusted_path_redirect(uid, name, target_path);
         strcpy((char *)name, target_path);
         return;
     }
@@ -574,6 +615,8 @@ static void after_getname_flags(hook_fargs3_t *args, void *udata)
     if (kfunc(getname_kernel) && kfunc(putname)) {
         struct filename *nf = kfunc(getname_kernel)(target_path);
         if (!IS_ERR_OR_NULL(nf)) {
+            if (trace_untrusted_redirect)
+                su_log_untrusted_path_redirect(uid, name, target_path);
             kfunc(putname)(fn);
             args->ret = (uint64_t)nf;
             return;

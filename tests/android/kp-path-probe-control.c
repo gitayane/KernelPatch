@@ -89,19 +89,33 @@ int main(int argc, char **argv)
 #endif
 
     if (argc != 2) {
-        fprintf(stderr, "Usage: %s query|disable|enable\n", argv[0]);
+        fprintf(stderr, "Usage: %s query|disable|enable|trace-query|trace-off|trace-on\\n", argv[0]);
         return 2;
     }
 
     int state;
+    int trace_op = 0;
+    const char *feature_name = "path_probe";
     if (!strcmp(argv[1], "query")) {
         state = -1;
     } else if (!strcmp(argv[1], "disable")) {
         state = 0;
     } else if (!strcmp(argv[1], "enable")) {
         state = 1;
+    } else if (!strcmp(argv[1], "trace-query")) {
+        state = -1;
+        trace_op = 1;
+        feature_name = "path_probe_trace";
+    } else if (!strcmp(argv[1], "trace-off")) {
+        state = 0;
+        trace_op = 1;
+        feature_name = "path_probe_trace";
+    } else if (!strcmp(argv[1], "trace-on")) {
+        state = 1;
+        trace_op = 1;
+        feature_name = "path_probe_trace";
     } else {
-        fprintf(stderr, "Unknown operation: %s\n", argv[1]);
+        fprintf(stderr, "Unknown operation: %s\\n", argv[1]);
         return 2;
     }
 
@@ -118,7 +132,7 @@ int main(int argc, char **argv)
 
     errno = 0;
     long ret = syscall(KP_SUPERCALL_NR, key, (long)version_cmd,
-                       "path_probe", (long)state);
+                       feature_name, (long)state);
     int saved_errno = errno;
     wipe_secret(key, sizeof(key));
 
@@ -131,7 +145,16 @@ int main(int argc, char **argv)
     printf("operation=%s state=%d return=%ld\n", argv[1], state, ret);
 
     if (state == -1) {
-        if (ret == 0) {
+        if (trace_op) {
+            if (ret == 0) {
+                puts("PATH_PROBE_TRACE_STATE=0 (disabled)");
+            } else if (ret == 1) {
+                puts("PATH_PROBE_TRACE_STATE=1 (enabled)");
+            } else {
+                puts("WARNING: unexpected trace query result");
+                return 1;
+            }
+        } else if (ret == 0) {
             puts("PATH_PROBE_STATE=0 (no tracked hooks)");
         } else if (ret == 1) {
             puts("PATH_PROBE_STATE=1 (required shared hook coverage ready)");
