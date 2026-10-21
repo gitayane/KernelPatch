@@ -14,6 +14,7 @@
 #include <linux/uaccess.h>
 #include <stdbool.h>
 #include <asm/current.h>
+#include <asm/cmpxchg.h>
 #include <linux/cred.h>
 #include <linux/sched.h>
 #include <uapi/scdefs.h>
@@ -114,21 +115,38 @@ static bool su_hook_result_is_registered(hook_err_t rc)
 static bool su_path_probe_trace_enabled;
 static u32 su_path_probe_trace_count;
 
+/*
+ * Reserve a trace slot with the kernel tree's inline cmpxchg implementation.
+ * Do not use __atomic_fetch_add here: GCC may lower it to
+ * __aarch64_ldadd4_relax, which is unavailable in the freestanding kpimg link.
+ * Saturating at the sample limit also keeps the logger strictly bounded.
+ */
+static bool su_reserve_path_probe_trace_sample(u32 *sample)
+{
+    u32 n = __atomic_load_n(&su_path_probe_trace_count, __ATOMIC_RELAXED);
+
+    while (n < SU_PATH_PROBE_TRACE_MAX) {
+        u32 seen = cmpxchg_local(&su_path_probe_trace_count, n, n + 1);
+        if (seen == n) {
+            *sample = n + 1;
+            return true;
+        }
+        n = seen;
+    }
+    return false;
+}
+
 static void su_log_untrusted_path_redirect(uid_t uid, const char *source, const char *target)
 {
+    u32 sample;
+
     if (!__atomic_load_n(&su_path_probe_trace_enabled, __ATOMIC_RELAXED))
         return;
-
-    u32 n = __atomic_fetch_add(&su_path_probe_trace_count, 1, __ATOMIC_RELAXED);
-    if (n >= SU_PATH_PROBE_TRACE_MAX) {
-        if (n == SU_PATH_PROBE_TRACE_MAX)
-            logkfi("path-probe trace: rate limit reached (%u records)\n",
-                   SU_PATH_PROBE_TRACE_MAX);
+    if (!su_reserve_path_probe_trace_sample(&sample))
         return;
-    }
 
     logkfi("path-probe trace: ungranted uid=%d source=%s target=%s sample=%u/%u\n",
-           uid, source, target, n + 1, SU_PATH_PROBE_TRACE_MAX);
+           uid, source, target, sample, SU_PATH_PROBE_TRACE_MAX);
 }
 
 long kp_control_feature_sc(const char __user *uname, int state)
