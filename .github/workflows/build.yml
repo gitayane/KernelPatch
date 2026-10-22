@@ -14,6 +14,11 @@ on:
         required: true
         type: boolean
         default: false
+      build_macos:
+        description: "Run the macOS kptools build on a work branch (macOS runners may be queued separately)"
+        required: true
+        type: boolean
+        default: false
       enable_xzp_44_dispatcher:
         description: "EXPERIMENTAL: enable the Linux 4.4 global dispatcher; selects the safe single-B trace-island path unless a diagnostic mode is selected"
         required: true
@@ -549,6 +554,10 @@ jobs:
           prerelease: ${{ steps.parse_version.outputs.IS_PRERELEASE == 'true' }}
 
   Build-on-mac:
+    # Keep the fast feedback CI green on work branches when GitHub has no
+    # macOS runner available. Stable/release branches still require this build;
+    # a work branch can opt in through workflow_dispatch -> build_macos.
+    if: ${{ !startsWith(github.ref, 'refs/heads/work/') || (github.event_name == 'workflow_dispatch' && inputs.build_macos) }}
     runs-on: macos-latest
     permissions:
       contents: write
