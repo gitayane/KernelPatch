@@ -833,23 +833,15 @@ static long syscall_dispatch_nr(struct pt_regs *regs, unsigned long scno, int is
     return nr;
 }
 
-static int syscall_hook_needs_gate(int nr, int is_compat)
+static int syscall_hook_gate_current(void)
 {
-    int high = syscall_hook_high;
-    if (high > SYSCALL_HOOK_SLOT_NUM) high = SYSCALL_HOOK_SLOT_NUM;
-
-    for (int i = 0; i < high; i++) {
-        if (syscall_hooks[i].state != CHAIN_ITEM_STATE_READY) continue;
-        if (syscall_hooks[i].nr != nr || syscall_hooks[i].is_compat != is_compat) continue;
-        if (syscall_hooks[i].require_gate && !syscall_hooks[i].bypass_gate) return 1;
-    }
-    return 0;
-}
-
-static int syscall_hook_gate_for(int nr, int is_compat)
-{
-    /* Avoid a UID/kstorage lookup on unrelated syscalls with no gated callbacks. */
-    if (!syscall_hook_gate || !syscall_hook_needs_gate(nr, is_compat)) return 1;
+    /*
+     * Evaluate the shared predicate on every syscall while the dispatcher is
+     * active, but apply its result only to explicitly gated slots. This preserves
+     * the uniform per-syscall cost profile while ordinary hook registrations
+     * continue to run for all UIDs.
+     */
+    if (!syscall_hook_gate) return 1;
     return syscall_hook_gate() ? 1 : 0;
 }
 
@@ -892,7 +884,7 @@ static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
     /* UID gating is opt-in per registration. Ordinary hooks retain their
      * all-caller semantics; only explicitly gated sucompat callbacks are
      * suppressed for UIDs rejected by the shared predicate. */
-    int gate_ok = syscall_hook_gate_for((int)nr, is_compat);
+    int gate_ok = syscall_hook_gate_current();
 
     struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
     int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
@@ -964,7 +956,7 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
      * cause a gated after-callback to run without its before phase. */
     int gate_ok = 1;
     if (!syscall_hook_load_gate_state(args, &gate_ok))
-        gate_ok = syscall_hook_gate_for((int)nr, is_compat);
+        gate_ok = syscall_hook_gate_current();
 
     struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
     int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
