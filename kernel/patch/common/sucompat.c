@@ -540,11 +540,11 @@ __maybe_unused static void before_execveat(hook_fargs5_t *args, void *udata)
 // 		int, dfd, const char __user *, filename, unsigned, flags,
 // 		unsigned int, mask,
 // 		struct statx __user *, buffer)
-/* Evaluated once per syscall by the dispatcher (syscall_hook_set_gate). Only
- * root / su-allow / trusted-manager callers reach the callbacks at all, which is
- * what lets su_handler_arg1_ufilename_before and friends drop their own root
- * checks: for everyone else the dispatcher runs no callback, on any syscall, so
- * there is no per-syscall signature and no cross-syscall inconsistency. */
+/* These sucompat registrations opt into the dispatcher's UID gate. The
+ * predicate is evaluated uniformly across syscalls but suppresses only the
+ * explicitly gated sucompat slots; ordinary KernelPatch hooks retain their
+ * all-caller semantics. The legacy path-probe callback keeps its own UID check
+ * because older per-syscall backends do not apply the shared dispatcher gate. */
 static int su_syscall_gate(void)
 {
     uid_t uid = current_uid();
