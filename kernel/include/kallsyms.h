@@ -8,5 +8,6 @@ struct module;
 extern int (*kallsyms_on_each_symbol)(int (*fn)(void *, const char *, struct module *, unsigned long), void *data);
 extern int kallsyms_on_each_match_symbol(int (*fn)(void *, unsigned long), const char *name, void *data);
 extern unsigned long (*kallsyms_lookup_name)(const char *name);
+unsigned long kallsyms_lookup_name_by_suffix(const char *name);
 
 #endif

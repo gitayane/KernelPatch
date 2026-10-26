@@ -14,6 +14,7 @@
 #include <linux/uaccess.h>
 #include <stdbool.h>
 #include <asm/current.h>
+#include <asm/cmpxchg.h>
 #include <linux/cred.h>
 #include <linux/sched.h>
 #include <uapi/scdefs.h>
@@ -55,10 +56,99 @@ static const char *current_su_path = 0;
 
 static int su_kstorage_gid = -1;
 static int exclude_kstorage_gid = -1;
-static void su_register_path_probe_hooks(void);
+static int su_register_path_probe_hooks(void);
 static void su_unregister_path_probe_hooks(void);
 static int su_hook_getname_flags(void);
+static int su_hook_security_inode_getattr(void);
+static int su_hook_security_file_open(void);
 static int su_syscall_gate(void);
+
+/*
+ * Shared path-probe hooks. The normal path is getname_flags +
+ * security_inode_getattr, matching upstream KernelPatch. The old
+ * per-syscall probes remain as a fallback when a 4.4/LTO symbol cannot
+ * be resolved or hooked safely.
+ */
+static unsigned long su_getname_flags_addr;
+static unsigned long su_security_inode_getattr_addr;
+static unsigned long su_security_file_open_addr;
+static bool su_getname_flags_hooked;
+static bool su_security_inode_getattr_hooked;
+static bool su_security_file_open_hooked;
+static bool su_legacy_fstatat_hooked;
+static bool su_legacy_faccessat_hooked;
+static bool su_legacy_compat_fstatat64_hooked;
+static bool su_legacy_compat_faccessat_hooked;
+
+static bool su_path_probe_hooks_any_registered(void)
+{
+    return su_getname_flags_hooked || su_security_inode_getattr_hooked ||
+           su_security_file_open_hooked || su_legacy_fstatat_hooked ||
+           su_legacy_faccessat_hooked || su_legacy_compat_fstatat64_hooked ||
+           su_legacy_compat_faccessat_hooked;
+}
+
+static bool su_path_probe_shared_hooks_ready(void)
+{
+    /*
+     * Linux 4.4 also needs the resolved-open hook: getname_flags sees the
+     * original spelling, while inode_getattr alone cannot block every open.
+     */
+    bool resolved_open_required =
+        kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0);
+
+    return su_getname_flags_hooked && su_security_inode_getattr_hooked &&
+           (!resolved_open_required || su_security_file_open_hooked);
+}
+
+static bool su_hook_result_is_registered(hook_err_t rc)
+{
+    /* A duplicate means the same callback is already present in this hook chain. */
+    return rc == HOOK_NO_ERR || rc == -HOOK_DUPLICATED;
+}
+
+/*
+ * Opt-in, bounded diagnostics for proving that the ungranted path rewrite runs.
+ * Disabled by default so normal operation adds no logging noise.
+ */
+#define SU_PATH_PROBE_TRACE_MAX 32
+static bool su_path_probe_trace_enabled;
+static u32 su_path_probe_trace_count;
+
+/*
+ * Reserve a trace slot with the kernel tree's inline cmpxchg implementation.
+ * Do not use __atomic_fetch_add here: GCC may lower it to
+ * __aarch64_ldadd4_relax, which is unavailable in the freestanding kpimg link.
+ * Saturating at the sample limit also keeps the logger strictly bounded.
+ */
+static bool su_reserve_path_probe_trace_sample(u32 *sample)
+{
+    u32 n = __atomic_load_n(&su_path_probe_trace_count, __ATOMIC_RELAXED);
+
+    while (n < SU_PATH_PROBE_TRACE_MAX) {
+        u32 seen = cmpxchg_local(&su_path_probe_trace_count, n, n + 1);
+        if (seen == n) {
+            *sample = n + 1;
+            return true;
+        }
+        n = seen;
+    }
+    return false;
+}
+
+static void su_log_untrusted_path_redirect(uid_t uid, const char *source, const char *target)
+{
+    u32 sample;
+
+    if (!__atomic_load_n(&su_path_probe_trace_enabled, __ATOMIC_RELAXED))
+        return;
+    if (!su_reserve_path_probe_trace_sample(&sample))
+        return;
+
+    logkfi("path-probe trace: ungranted uid=%d source=%s target=%s sample=%u/%u\n",
+           uid, source, target, sample, SU_PATH_PROBE_TRACE_MAX);
+}
+
 long kp_control_feature_sc(const char __user *uname, int state)
 {
     char name[64];
@@ -70,14 +160,38 @@ long kp_control_feature_sc(const char __user *uname, int state)
         return selinux_hide_control(state);
     }
 
-    if (!strcmp(name, "sucompat_extra") || !strcmp(name, "path_probe")) {
+    if (!strcmp(name, "path_probe_trace")) {
         if (state < 0)
-            /* Query: check if the hooks are currently registered. */
-            return 0;   /* not tracked */
-        if (state)
-            su_register_path_probe_hooks();
-        else
+            return __atomic_load_n(&su_path_probe_trace_enabled, __ATOMIC_RELAXED) ? 1 : 0;
+        if (state) {
+            __atomic_store_n(&su_path_probe_trace_count, 0, __ATOMIC_RELAXED);
+            __atomic_store_n(&su_path_probe_trace_enabled, true, __ATOMIC_RELAXED);
+        } else {
+            __atomic_store_n(&su_path_probe_trace_enabled, false, __ATOMIC_RELAXED);
+        }
+        logkfi("path-probe trace %s via supercall\n", state ? "enabled" : "disabled");
+        return 0;
+    }
+
+    if (!strcmp(name, "sucompat_extra") || !strcmp(name, "path_probe")) {
+        if (state < 0) {
+            /*
+             * Query states: 0=no tracked hooks, 1=required shared coverage
+             * ready, 2=partial/degraded hooks registered.
+             */
+            if (su_path_probe_shared_hooks_ready())
+                return 1;
+            return su_path_probe_hooks_any_registered() ? 2 : 0;
+        }
+        if (state) {
+            int rc = su_register_path_probe_hooks();
+            if (rc < 0) {
+                log_boot("ERROR: path-probe enable did not achieve required coverage rc=%d\n", rc);
+                return rc;
+            }
+        } else {
             su_unregister_path_probe_hooks();
+        }
         logkfi("sucompat_extra %s via supercall\n",
                state ? "enabled" : "disabled");
         return 0;
@@ -141,13 +255,24 @@ KP_EXPORT_SYMBOL(is_su_allow_uid);
 int su_add_allow_uid(uid_t uid, uid_t to_uid, const char *scontext)
 {
     if (!scontext) scontext = "";
+
     struct su_profile profile = {
-        uid,
-        to_uid,
+        .uid = uid,
+        .to_uid = to_uid,
     };
-    memcpy(profile.scontext, scontext, SUPERCALL_SCONTEXT_LEN);
-    int rc = write_kstorage(su_kstorage_gid, uid, &profile, 0, sizeof(struct su_profile), false);
-    logkfd("uid: %d, to_uid: %d, sctx: %s, rc: %d\n", uid, to_uid, scontext, rc);
+
+    /*
+     * scontext is supplied by kernel-side callers and may be a short string
+     * literal. Copy only its actual bytes plus the terminator; the previous
+     * fixed-size memcpy could read beyond the source object. The zero-initialized
+     * profile keeps the unused tail deterministic for storage and comparisons.
+     */
+    size_t sctx_len = strnlen(scontext, sizeof(profile.scontext));
+    if (sctx_len >= sizeof(profile.scontext)) return -E2BIG;
+    memcpy(profile.scontext, scontext, sctx_len + 1);
+
+    int rc = write_kstorage(su_kstorage_gid, uid, &profile, 0, sizeof(profile), false);
+    logkfd("uid: %d, to_uid: %d, rc: %d\n", uid, to_uid, rc);
     return rc;
 }
 KP_EXPORT_SYMBOL(su_add_allow_uid);
@@ -215,22 +340,40 @@ int su_allow_uid_profile(int is_user, uid_t uid, struct su_profile *out_profile)
 {
     int rc = 0;
 
+    if (!out_profile) return -EINVAL;
+
     rcu_read_lock();
     const struct kstorage *ks = get_kstorage(su_kstorage_gid, uid);
-    if (IS_ERR(ks)) {
+    if (IS_ERR_OR_NULL(ks)) {
         rc = -ENOENT;
         goto out;
     }
-    struct su_profile *profile = (struct su_profile *)ks->data;
+
+    /*
+     * Treat a malformed or stale record as absent. The lookup is protected by
+     * RCU, but grant/revoke operations can race with a caller that previously
+     * observed the UID as allowed; never copy a partial profile or accept a
+     * record whose embedded UID no longer matches the lookup key.
+     */
+    if (ks->dlen < sizeof(struct su_profile)) {
+        rc = -EINVAL;
+        goto out;
+    }
+
+    const struct su_profile *profile = (const struct su_profile *)ks->data;
+    if (profile->uid != uid) {
+        rc = -ENOENT;
+        goto out;
+    }
 
     if (is_user) {
-        rc = compat_copy_to_user(out_profile, profile, sizeof(struct su_profile));
+        rc = compat_copy_to_user(out_profile, (void *)profile, sizeof(*profile));
         if (rc <= 0) {
             logkfd("compat_copy_to_user error: %d", rc);
             goto out;
         }
     } else {
-        memcpy(out_profile, profile, sizeof(struct su_profile));
+        memcpy(out_profile, profile, sizeof(*profile));
     }
 
 out:
@@ -397,11 +540,11 @@ __maybe_unused static void before_execveat(hook_fargs5_t *args, void *udata)
 // 		int, dfd, const char __user *, filename, unsigned, flags,
 // 		unsigned int, mask,
 // 		struct statx __user *, buffer)
-/* Evaluated once per syscall by the dispatcher (syscall_hook_set_gate). Only
- * root / su-allow / trusted-manager callers reach the callbacks at all, which is
- * what lets su_handler_arg1_ufilename_before and friends drop their own root
- * checks: for everyone else the dispatcher runs no callback, on any syscall, so
- * there is no per-syscall signature and no cross-syscall inconsistency. */
+/* These sucompat registrations opt into the dispatcher's UID gate. The
+ * predicate is evaluated uniformly across syscalls but suppresses only the
+ * explicitly gated sucompat slots; ordinary KernelPatch hooks retain their
+ * all-caller semantics. The legacy path-probe callback keeps its own UID check
+ * because older per-syscall backends do not apply the shared dispatcher gate. */
 static int su_syscall_gate(void)
 {
     uid_t uid = current_uid();
@@ -412,11 +555,10 @@ __maybe_unused static void su_handler_arg1_ufilename_before(hook_fargs6_t *args,
 {
     uid_t uid = current_uid();
 
-    /* In global-dispatcher mode the dispatcher already gated this callback on the
-     * caller's uid (su_syscall_gate), so the check would be redundant; the legacy
-     * per-syscall fallback has no gate, so it must stay there. udata == 1 marks a
-     * gated registration. */
-    if (!udata && uid != 0 && !is_su_allow_uid(uid) && !is_trusted_manager_uid(uid)) return;
+    /* Keep an explicit check for the legacy per-syscall backend and as defense
+     * in depth. The global dispatcher also gates this specific registration. */
+    (void)udata;
+    if (uid != 0 && !is_su_allow_uid(uid) && !is_trusted_manager_uid(uid)) return;
 
     char __user **u_filename_p = (char __user **)syscall_argn_p(args, 1);
 
@@ -439,41 +581,84 @@ __maybe_unused static void su_handler_arg1_ufilename_before(hook_fargs6_t *args,
     }
 }
 
+#ifdef ANDROID
+/*
+ * A path that cannot identify a real su binary. /system is read-only for app
+ * UIDs, so an untrusted caller cannot create this sentinel to defeat the hide.
+ * Keep it shorter than both default aliases so the common path can be rewritten
+ * in-place without allocating another struct filename.
+ */
+static const char hidden_su_path[] = "/system/.kp";
+#endif
+
 static void after_getname_flags(hook_fargs3_t *args, void *udata)
 {
     struct filename *fn = (struct filename *)args->ret;
     if (IS_ERR_OR_NULL(fn)) return;
 
+    const char *name = fn->name;
+    if (!name) return;
+
+    bool trace_untrusted_redirect = false;
+#ifdef ANDROID
+    /*
+     * The VFS hook must hide a real su file from ungranted callers as well as
+     * presenting a shell-compatible alias to granted callers. Do the cheap path
+     * comparison first, so unrelated path lookups do not walk the SU allowlist.
+     * This hook also covers execve path resolution, which the globally gated
+     * syscall callbacks intentionally skip for ungranted UIDs.
+     */
+    if (strcmp(name, su_get_path()) && strcmp(name, legacy_su_path)) return;
+
+    uid_t uid = current_uid();
+    bool granted = is_su_allow_uid(uid) || is_trusted_manager_uid(uid);
+    const char *target_path = granted ? sh_path : hidden_su_path;
+    trace_untrusted_redirect = !granted;
+#else
+    if (strcmp(name, su_get_path())) return;
+
     uid_t uid = current_uid();
     if (!is_su_allow_uid(uid) && !is_trusted_manager_uid(uid)) return;
+    const char *target_path = sh_path;
+#endif
 
-    const char *name = fn->name;
-    if (!name || strcmp(name, su_get_path())) return;
-
-    if (strlen(sh_path) <= strlen(name)) {
-        strcpy((char *)name, sh_path);
+    if (strlen(target_path) <= strlen(name)) {
+        if (trace_untrusted_redirect)
+            su_log_untrusted_path_redirect(uid, name, target_path);
+        strcpy((char *)name, target_path);
         return;
     }
 
     if (kfunc(getname_kernel) && kfunc(putname)) {
-        struct filename *nf = kfunc(getname_kernel)(sh_path);
+        struct filename *nf = kfunc(getname_kernel)(target_path);
         if (!IS_ERR_OR_NULL(nf)) {
+            if (trace_untrusted_redirect)
+                su_log_untrusted_path_redirect(uid, name, target_path);
             kfunc(putname)(fn);
             args->ret = (uint64_t)nf;
             return;
         }
     }
 
-    logkfi("uid: %d, cannot redirect su path to %s\n", uid, sh_path);
+    logkfi("uid: %d, cannot redirect su path to %s\n", uid, target_path);
 }
 
-// stat-class probes on a real third-party su binary: security_inode_getattr fires
-// because the file genuinely exists. Show it only to granted uids (return 0, same
-// as the virtual su path which getname_flags redirects to sh for them) and hide
-// it from everyone else by failing the getattr (-ENOENT), which makes vfs_getattr
-// report ENOENT and the probe sees no su. struct path is { mnt; dentry; }.
-typedef char *(*su_dentry_path_raw_t)(void *dentry, char *buf, int buflen);
-static su_dentry_path_raw_t su_dentry_path_raw = 0;
+// Use d_path(), not dentry_path_raw(): the latter omits the mountpoint, so a file
+// mounted at /system/bin/su is represented as /bin/su and will not match the
+// absolute Android alias. d_path() receives struct path and returns the mount-aware
+// pathname for both getattr and file-open hooks.
+typedef char *(*su_d_path_t)(const struct path *path, char *buf, int buflen);
+static su_d_path_t su_d_path = 0;
+
+static bool su_is_target_dentry_path(const char *path)
+{
+    if (!path || !path[0]) return false;
+#ifdef ANDROID
+    return !strcmp(path, su_get_path()) || !strcmp(path, legacy_su_path);
+#else
+    return !strcmp(path, su_get_path());
+#endif
+}
 
 static void after_security_inode_getattr(hook_fargs1_t *args, void *udata)
 {
@@ -482,20 +667,12 @@ static void after_security_inode_getattr(hook_fargs1_t *args, void *udata)
     uid_t uid = current_uid();
     bool granted = is_su_allow_uid(uid) || is_trusted_manager_uid(uid);
 
-    void *path = (void *)args->arg0;
-    if (!path) return;
-    void *dentry = *(void **)((char *)path + 8); // path->dentry
-    if (!dentry || !su_dentry_path_raw) return;
+    const struct path *path = (const struct path *)args->arg0;
+    if (!path || !su_d_path) return;
 
     char buf[PATH_MAX];
-    char *p = su_dentry_path_raw(dentry, buf, sizeof(buf));
-    if (!p || !p[0]) return;
-
-#ifdef ANDROID
-    if (strcmp(p, su_get_path()) && strcmp(p, legacy_su_path)) return;
-#else
-    if (strcmp(p, su_get_path())) return;
-#endif
+    char *p = su_d_path(path, buf, sizeof(buf));
+    if (IS_ERR_OR_NULL(p) || !su_is_target_dentry_path(p)) return;
 
     // Hide the real su file from unprivileged callers; keep it visible to granted ones.
     if (!granted) {
@@ -504,6 +681,44 @@ static void after_security_inode_getattr(hook_fargs1_t *args, void *udata)
     } else {
         logkfi("uid: %d, show real su file: %s\n", uid, p);
     }
+}
+
+/*
+ * The small kernel shim headers intentionally forward-declare struct file.
+ * On Linux 4.4, struct file starts with a union of llist_node and rcu_head,
+ * both pointer-sized pairs on the supported 32/64-bit layouts; f_path follows
+ * that 2-pointer-sized prefix. Mirror only this stable prefix rather than
+ * inventing the remainder of struct file.
+ */
+struct su_file_path_layout {
+    uintptr_t f_u[2];
+    struct {
+        void *mnt;
+        void *dentry;
+    } f_path;
+};
+
+/* Post-LSM open hook: resolve the path from the opened file to catch aliases
+ * such as dot-dot components or symlinks that did not match getname_flags. */
+static void after_security_file_open(hook_fargs2_t *args, void *udata)
+{
+    if ((long)args->ret < 0) return;
+
+    struct file *file = (struct file *)args->arg0;
+    if (!file || !su_d_path) return;
+
+    struct su_file_path_layout *layout = (struct su_file_path_layout *)file;
+    const struct path *path = (const struct path *)&layout->f_path;
+
+    char buf[PATH_MAX];
+    char *p = su_d_path(path, buf, sizeof(buf));
+    if (IS_ERR_OR_NULL(p) || !su_is_target_dentry_path(p)) return;
+
+    uid_t uid = current_uid();
+    if (is_su_allow_uid(uid) || is_trusted_manager_uid(uid)) return;
+
+    args->ret = (uint64_t)-ENOENT;
+    logkfi("uid: %d, deny open of real su file: %s\n", uid, p);
 }
 
 int set_ap_mod_exclude(uid_t uid, int exclude)
@@ -571,22 +786,22 @@ int su_compat_init()
 
     // if (!enable) return;
 
-    rc = hook_syscalln(__NR_execve, 3, before_execve, 0, (void *)0);
+    rc = hook_syscalln_gated(__NR_execve, 3, before_execve, 0, (void *)0);
     log_boot("hook __NR_execve rc: %d\n", rc);
 
     /* Android init may execute commands through execveat().  Keep the
      * SUPERCMD/su redirection on both entry points; otherwise /system/bin/
      * truncate is executed literally and every apd bootstrap command exits
      * with status 1. */
-    rc = hook_syscalln(__NR_execveat, 5, before_execveat, 0, (void *)0);
+    rc = hook_syscalln_gated(__NR_execveat, 5, before_execveat, 0, (void *)0);
     log_boot("hook __NR_execveat rc: %d\n", rc);
 
     // __NR_execve 11
-    rc = hook_compat_syscalln(11, 3, before_execve, 0, (void *)1);
+    rc = hook_compat_syscalln_gated(11, 3, before_execve, 0, (void *)1);
     log_boot("hook 32 __NR_execve rc: %d\n", rc);
 
     // __NR_execveat 387 on arm64 compat
-    rc = hook_compat_syscalln(387, 5, before_execveat, 0, (void *)1);
+    rc = hook_compat_syscalln_gated(387, 5, before_execveat, 0, (void *)1);
     log_boot("hook 32 __NR_execveat rc: %d\n", rc);
 
     su_register_path_probe_hooks();
@@ -595,64 +810,250 @@ int su_compat_init()
 }
 static int su_hook_getname_flags(void)
 {
-    // Redirect the su path only for granted uids: after_getname_flags checks
-    // is_su_allow_uid/is_trusted_manager_uid, so a granted app's stat/access on
-    // /system/bin/su or /system/bin/kp lands on the real /system/bin/sh and the
-    // probe reports it present, while unprivileged callers keep the virtual su
-    // path un-redirected and get ENOENT (hidden).
-    //
-    // LTO kernels (e.g. OPPO 6.1) emit getname_flags as a CFI wrapper with zero
-    // callers; the real entry all path syscalls reach is __original_getname_flags.
-    // Prefer it, fall back to getname_flags for non-LTO builds.
-    hook_err_t rc = 0;
-    unsigned long getname_flags_addr = 0;
-    getname_flags_addr = kallsyms_lookup_name("__original_getname_flags");
-    if (!getname_flags_addr) {
-        getname_flags_addr = kallsyms_lookup_name("getname_flags");
-    }else{
-        logkfi("found __original_getname_flags: %llx\n", getname_flags_addr);
+    unsigned long addr = kallsyms_lookup_name_by_suffix("getname_flags");
+    if (!addr) {
+        log_boot("getname_flags not found (including compiler suffixes)\n");
+        return -HOOK_BAD_ADDRESS;
     }
-    if (getname_flags_addr) {
-        rc = hook_wrap3((void *)getname_flags_addr, 0, after_getname_flags, (void *)0);
-        log_boot("hook getname_flags rc: %d\n", rc);
-    } else {
-        log_boot("getname_flags not found\n");
-        rc = -HOOK_BAD_ADDRESS;
+
+    hook_err_t rc = hook_wrap3((void *)addr, 0, after_getname_flags, (void *)0);
+    if (rc) {
+        log_boot("hook getname_flags @ %llx rc: %d\n", addr, rc);
+        return rc;
     }
-    return rc;
+
+    su_getname_flags_addr = addr;
+    su_getname_flags_hooked = true;
+    log_boot("hook getname_flags @ %llx rc: 0\n", addr);
+    return 0;
 }
 
-static void su_register_path_probe_hooks(void)
+static int su_hook_security_file_open(void)
 {
-    #ifdef ANDROID
-        if (unlikely(android_is_safe_mode)) return;
-    #endif
+    /*
+     * This shim models the Linux 4.4 struct file prefix. Newer kernels may
+     * reorder struct file (some builds enable __randomize_layout), so never
+     * dereference this layout there. Keep the resolved-open backstop scoped to
+     * the XZP 4.4 target; other kernels retain the upstream path/getattr hooks.
+     */
+    if (kver < VERSION(4, 4, 0) || kver >= VERSION(4, 5, 0)) {
+        log_boot("security_file_open SU path check skipped: file layout shim is Linux 4.4-specific (kver=%x)\n",
+                 kver);
+        return -EOPNOTSUPP;
+    }
+
+    /*
+     * security_file_open sees the resolved file path, so it complements
+     * getname_flags (which only sees the original spelling) and catches path
+     * aliases such as dot-dot components or symlinks to a real su binary.
+     */
+    if (!su_d_path) {
+        unsigned long d_path_addr = kallsyms_lookup_name_by_suffix("d_path");
+        if (!d_path_addr) {
+            log_boot("d_path not found for security_file_open\n");
+            return -HOOK_BAD_ADDRESS;
+        }
+        su_d_path = (su_d_path_t)d_path_addr;
+    }
+
+    unsigned long addr = kallsyms_lookup_name_by_suffix("security_file_open");
+    if (!addr) {
+        log_boot("security_file_open not found (including compiler suffixes)\n");
+        return -HOOK_BAD_ADDRESS;
+    }
+
+    hook_err_t rc = hook_wrap2((void *)addr, 0, after_security_file_open, (void *)0);
+    if (rc) {
+        log_boot("hook security_file_open @ %llx rc: %d\n", addr, rc);
+        return rc;
+    }
+
+    su_security_file_open_addr = addr;
+    su_security_file_open_hooked = true;
+    log_boot("hook security_file_open @ %llx, d_path @ %llx rc: 0\n",
+             addr, (uint64_t)su_d_path);
+    return 0;
+}
+
+static int su_hook_security_inode_getattr(void)
+{
+    unsigned long d_path_addr = kallsyms_lookup_name_by_suffix("d_path");
+    if (!d_path_addr) {
+        log_boot("d_path not found (including compiler suffixes)\n");
+        return -HOOK_BAD_ADDRESS;
+    }
+
+    su_d_path = (su_d_path_t)d_path_addr;
+
+    unsigned long getattr_addr = kallsyms_lookup_name_by_suffix("security_inode_getattr");
+    if (!getattr_addr) {
+        log_boot("security_inode_getattr not found (including compiler suffixes)\n");
+        return -HOOK_BAD_ADDRESS;
+    }
+
+    hook_err_t rc = hook_wrap1((void *)getattr_addr, 0, after_security_inode_getattr, (void *)0);
+    if (rc) {
+        log_boot("hook security_inode_getattr @ %llx rc: %d\n", getattr_addr, rc);
+        return rc;
+    }
+
+    su_security_inode_getattr_addr = getattr_addr;
+    su_security_inode_getattr_hooked = true;
+    log_boot("hook security_inode_getattr @ %llx, d_path @ %llx rc: 0\n",
+             getattr_addr, d_path_addr);
+    return 0;
+}
+
+/*
+ * Remove the legacy per-syscall fallback once the shared path hooks are ready.
+ * Registration can be retried after a partial hook failure; without this cleanup,
+ * a later successful retry would leave both mechanisms active until an explicit
+ * disable, adding redundant callbacks and making registration state misleading.
+ */
+static void su_unregister_legacy_path_probe_hooks(void)
+{
+    if (su_legacy_fstatat_hooked) {
+        unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
+        su_legacy_fstatat_hooked = false;
+    }
+    if (su_legacy_faccessat_hooked) {
+        unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
+        su_legacy_faccessat_hooked = false;
+    }
+    if (su_legacy_compat_fstatat64_hooked) {
+        unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
+        su_legacy_compat_fstatat64_hooked = false;
+    }
+    if (su_legacy_compat_faccessat_hooked) {
+        unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
+        su_legacy_compat_faccessat_hooked = false;
+    }
+}
+
+static int su_register_path_probe_hooks(void)
+{
+#ifdef ANDROID
+    if (unlikely(android_is_safe_mode)) {
+        log_boot("ERROR: path-probe registration skipped in safe mode\n");
+        return -EPERM;
+    }
+#endif
     hook_err_t rc;
 
-    /* udata == 1 tells the callback the dispatcher gate already handled the uid
-     * check; without the global dispatcher it must do the check itself. */
-    void *gated = syscall_hook_global_enabled() ? (void *)1 : (void *)0;
+    /*
+     * Prefer the shared upstream path-observation hooks. On this 4.4 kernel
+     * getname_flags() and security_inode_getattr() are real VFS entry points,
+     * and d_path() lets the getattr/open hooks identify the resolved absolute path.
+     *
+     * If either hook cannot be resolved/installed, keep the legacy syscall
+     * probes below as a conservative fallback rather than silently disabling
+     * path compatibility.
+     */
+    if (!su_getname_flags_hooked)
+        su_hook_getname_flags();
+    if (!su_security_inode_getattr_hooked)
+        su_hook_security_inode_getattr();
+    if (!su_security_file_open_hooked)
+        su_hook_security_file_open();
 
-    rc = hook_syscalln(__NR3264_fstatat, 4, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("hook __NR3264_fstatat rc: %d\n", rc);
+    log_boot("su path concealment hooks: getname_flags=%d inode_getattr=%d file_open=%d\n",
+             su_getname_flags_hooked, su_security_inode_getattr_hooked,
+             su_security_file_open_hooked);
 
-    rc = hook_syscalln(__NR_faccessat, 3, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("hook __NR_faccessat rc: %d\n", rc);
+    /*
+     * On the Linux 4.4 target, require security_file_open as well as the
+     * metadata hooks before declaring shared path concealment complete. It
+     * observes the resolved path for file opens, closing the symlink/dot-dot
+     * alias gap that getname_flags alone cannot see.
+     *
+     * The struct file layout shim is intentionally limited to Linux 4.4;
+     * kernels outside that range retain the getname_flags/getattr behavior.
+     */
+    if (su_path_probe_shared_hooks_ready()) {
+        su_unregister_legacy_path_probe_hooks();
+        log_boot("shared path probes enabled: getname_flags=%d inode_getattr=%d file_open=%d; legacy fstatat/faccessat probes skipped\n",
+                 su_getname_flags_hooked, su_security_inode_getattr_hooked,
+                 su_security_file_open_hooked);
+        return 0;
+    }
 
-    /* 32-bit compat probes: fstatat64(327) / faccessat(334) */
-    rc = hook_compat_syscalln(327, 4, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("hook 32 __NR_fstatat64 rc: %d\n", rc);
+    bool resolved_open_required =
+        kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0);
+    if (resolved_open_required && !su_security_file_open_hooked) {
+        log_boot("WARNING: resolved-open SU alias concealment unavailable; retaining legacy fstatat/faccessat probes\n");
+    } else {
+        log_boot("shared path probes incomplete; retaining legacy fstatat/faccessat probes\n");
+    }
 
-    rc = hook_compat_syscalln(334, 3, su_handler_arg1_ufilename_before, 0, gated);
-    log_boot("hook 32 __NR_faccessat rc: %d\n", rc);
+    /* Legacy per-syscall fallback. Gating is opt-in for the global dispatcher,
+     * while the callback retains its own UID check for legacy backends. */
+    if (!su_legacy_fstatat_hooked) {
+        rc = hook_syscalln_gated(__NR3264_fstatat, 4, su_handler_arg1_ufilename_before, 0, (void *)0);
+        su_legacy_fstatat_hooked = su_hook_result_is_registered(rc);
+        log_boot("legacy hook __NR3264_fstatat rc: %d registered=%d\n", rc,
+                 su_legacy_fstatat_hooked);
+    }
+
+    if (!su_legacy_faccessat_hooked) {
+        rc = hook_syscalln_gated(__NR_faccessat, 3, su_handler_arg1_ufilename_before, 0, (void *)0);
+        su_legacy_faccessat_hooked = su_hook_result_is_registered(rc);
+        log_boot("legacy hook __NR_faccessat rc: %d registered=%d\n", rc,
+                 su_legacy_faccessat_hooked);
+    }
+
+    /* 32-bit compat probes: fstatat64(327) / faccessat(334). */
+    if (!su_legacy_compat_fstatat64_hooked) {
+        rc = hook_compat_syscalln_gated(327, 4, su_handler_arg1_ufilename_before, 0, (void *)0);
+        su_legacy_compat_fstatat64_hooked = su_hook_result_is_registered(rc);
+        log_boot("legacy hook 32 __NR_fstatat64 rc: %d registered=%d\n", rc,
+                 su_legacy_compat_fstatat64_hooked);
+    }
+
+    if (!su_legacy_compat_faccessat_hooked) {
+        rc = hook_compat_syscalln_gated(334, 3, su_handler_arg1_ufilename_before, 0, (void *)0);
+        su_legacy_compat_faccessat_hooked = su_hook_result_is_registered(rc);
+        log_boot("legacy hook 32 __NR_faccessat rc: %d registered=%d\n", rc,
+                 su_legacy_compat_faccessat_hooked);
+    }
+
+    /*
+     * Legacy probes are retained as a degraded fallback, but they do not
+     * replace the shared VFS coverage. Do not report enable success unless all
+     * shared hooks required by this kernel are ready.
+     */
+    log_boot("ERROR: path-probe coverage incomplete; shared hooks are not ready (registered_any=%d); legacy fallbacks may remain active\n",
+             su_path_probe_hooks_any_registered());
+    return -ENODEV;
 }
 
 static void su_unregister_path_probe_hooks(void)
 {
-    unhook_syscalln(__NR3264_fstatat, su_handler_arg1_ufilename_before, 0);
-    unhook_syscalln(__NR_faccessat, su_handler_arg1_ufilename_before, 0);
-    unhook_compat_syscalln(327, su_handler_arg1_ufilename_before, 0);
-    unhook_compat_syscalln(334, su_handler_arg1_ufilename_before, 0);
+    su_unregister_legacy_path_probe_hooks();
+
+    if (su_security_file_open_hooked) {
+        hook_unwrap((void *)su_security_file_open_addr, 0, after_security_file_open);
+        su_security_file_open_addr = 0;
+        su_security_file_open_hooked = false;
+    }
+
+    if (su_security_inode_getattr_hooked) {
+        hook_unwrap((void *)su_security_inode_getattr_addr, 0, after_security_inode_getattr);
+        su_security_inode_getattr_addr = 0;
+        su_security_inode_getattr_hooked = false;
+    }
+
+    if (su_getname_flags_hooked) {
+        hook_unwrap((void *)su_getname_flags_addr, 0, after_getname_flags);
+        su_getname_flags_addr = 0;
+        su_getname_flags_hooked = false;
+    }
+
+    /*
+     * Keep the resolved d_path address cached. hook_unwrap() removes callbacks
+     * but does not wait for already-running callbacks to drain; clearing this
+     * pointer here could race with an in-flight callback that is about to call
+     * d_path(). The kernel symbol remains valid while KernelPatch is resident.
+     */
 }
 
 void sucompat_init()

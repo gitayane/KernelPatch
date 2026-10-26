@@ -8,6 +8,7 @@
 #include <cache.h>
 #include <ktypes.h>
 #include <hook.h>
+#include <hotpatch.h>
 #include <common.h>
 #include <linux/string.h>
 #include <symbol.h>
@@ -21,6 +22,8 @@
 #include <kallsyms.h>
 #include <kp_spinlock.h>
 #include <linux/kernel.h>
+#include <linux/stop_machine.h>
+#include <ksyms.h>
 #include <linux/string.h>
 
 uintptr_t *sys_call_table = 0;
@@ -34,6 +37,13 @@ KP_EXPORT_SYMBOL(has_syscall_wrapper);
 
 int has_config_compat = 0;
 KP_EXPORT_SYMBOL(has_config_compat);
+
+/*
+ * Set only if an experimental Linux 4.4 entry-site patch cannot be fully
+ * restored after an error. In that case per-syscall hooks must not be layered
+ * over potentially mixed entry paths.
+ */
+static volatile int syscall_4_4_backend_unsafe;
 
 struct user_arg_ptr
 {
@@ -267,19 +277,46 @@ long raw_syscall6(long nr, long arg0, long arg1, long arg2, long arg3, long arg4
 }
 KP_EXPORT_SYMBOL(raw_syscall6);
 
+/*
+ * The dispatcher cannot safely take over after any legacy syscall-table hooks
+ * have been installed: a table slot may then point at a hook-chain transit,
+ * which is not a syscall handler that the new backend may call as an origin.
+ * Record successful legacy registrations before the dispatcher starts and fail
+ * closed if the experimental 4.4 backend is ever enabled in that state.
+ */
+static volatile int syscall_4_4_legacy_slot_hooks_seen;
+
+static void syscall_4_4_note_legacy_slot_hook(void)
+{
+    if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0) &&
+        !syscall_hook_global_enabled()) {
+        syscall_4_4_legacy_slot_hooks_seen = 1;
+    }
+}
+
 hook_err_t fp_wrap_syscalln(int nr, int narg, int is_compat, void *before, void *after, void *udata)
 {
+    hook_err_t rc;
+
+    if (syscall_4_4_backend_unsafe) return -HOOK_BAD_ADDRESS;
+
+    if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0) &&
+        syscall_hook_global_enabled()) return HOOK_BAD_ADDRESS;
+
     if (!is_compat) {
         if (!sys_call_table) return HOOK_BAD_ADDRESS;
         uintptr_t fp_addr = (uintptr_t)(sys_call_table + nr);
         if (has_syscall_wrapper) narg = 1;
-        return fp_hook_wrap(fp_addr, narg, before, after, udata);
+        rc = fp_hook_wrap(fp_addr, narg, before, after, udata);
     } else {
         if (!compat_sys_call_table) return HOOK_BAD_ADDRESS;
         uintptr_t fp_addr = (uintptr_t)(compat_sys_call_table + nr);
         if (has_syscall_wrapper) narg = 1;
-        return fp_hook_wrap(fp_addr, narg, before, after, udata);
+        rc = fp_hook_wrap(fp_addr, narg, before, after, udata);
     }
+
+    if (!rc) syscall_4_4_note_legacy_slot_hook();
+    return rc;
 }
 KP_EXPORT_SYMBOL(fp_wrap_syscalln);
 
@@ -305,10 +342,20 @@ b #0xfffffffffeb452f4
 */
 hook_err_t inline_wrap_syscalln(int nr, int narg, int is_compat, void *before, void *after, void *udata)
 {
-    uintptr_t addr = syscalln_name_addr(nr, is_compat);
+    uintptr_t addr;
+    hook_err_t rc;
+
+    if (syscall_4_4_backend_unsafe) return -HOOK_BAD_ADDRESS;
+
+    if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0) &&
+        syscall_hook_global_enabled()) return HOOK_BAD_ADDRESS;
+
+    addr = syscalln_name_addr(nr, is_compat);
     if (!addr) return -HOOK_BAD_ADDRESS;
     if (has_syscall_wrapper) narg = 1;
-    return hook_wrap((void *)addr, narg, before, after, udata);
+    rc = hook_wrap((void *)addr, narg, before, after, udata);
+    if (!rc) syscall_4_4_note_legacy_slot_hook();
+    return rc;
 }
 KP_EXPORT_SYMBOL(inline_wrap_syscalln);
 
@@ -318,6 +365,273 @@ void inline_unwrap_syscalln(int nr, int is_compat, void *before, void *after)
     hook_unwrap((void *)addr, before, after);
 }
 KP_EXPORT_SYMBOL(inline_unwrap_syscalln);
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#define KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER must be 0 or 1"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "FAST_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS
+#define KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "FAST_BYPASS diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
+#error "FAST_BYPASS and FAST_ONLY diagnostic modes are mutually exclusive"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
+#define KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "PATCH_RESTORE diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS)
+#error "PATCH_RESTORE is mutually exclusive with FAST_ONLY and FAST_BYPASS"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "PREPARE_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE)
+#error "PREPARE_ONLY is mutually exclusive with FAST_ONLY, FAST_BYPASS, and PATCH_RESTORE"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "SYMBOLS_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY)
+#error "SYMBOLS_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "WRAPPERS_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY)
+#error "WRAPPERS_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "WRAPPER_FIRST_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY)
+#error "WRAPPER_FIRST_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "WRAPPER_LIST_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY)
+#error "WRAPPER_LIST_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "WRAPPER_PREFIX_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY)
+#error "WRAPPER_PREFIX_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY
+#define KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY must be 0 or 1"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY && !KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER
+#error "TRACE_ONLY diagnostic mode requires the experimental 4.4 dispatcher"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY && (KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS || KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE || KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY || KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY)
+#error "TRACE_ONLY is mutually exclusive with other dispatcher diagnostic modes"
+#endif
+
+#ifndef KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+#define KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS 0
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS != 0 && KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS != 1
+#error "KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS must be 0 or 1"
+#endif
+
+/*
+ * The historical three-word live trace-site patch corrupts the shared
+ * __ni_sys_trace+8 continuation (reproduced by the Oct 18, 2026 device log).
+ * A normal live dispatcher build must use the verified single-B trace island.
+ * Diagnostic modes remain available without TRACE_BYPASS because they do not
+ * install the live C-backed dispatcher.
+ */
+#if KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY && \
+    !KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY
+#error "Live Linux 4.4 dispatcher requires TRACE_BYPASS=1 (safe single-B trace island)"
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
+typedef int (*syscall_4_4_insn_patch_nosync_fn)(void *addr, uint32_t insn);
+typedef int (*syscall_4_4_stop_machine_fn)(int (*fn)(void *), void *data,
+                                           const struct cpumask *cpus);
+
+struct syscall_4_4_patch_restore_ctx {
+    void *addrs[3];
+    uint32_t patch[3];
+    uint32_t backup[3];
+    syscall_4_4_insn_patch_nosync_fn patch_nosync;
+    int patch_rc;
+    int restore_rc;
+    int ran;
+};
+
+static int syscall_4_4_patch_restore_write(struct syscall_4_4_patch_restore_ctx *ctx,
+                                           int index, uint32_t insn)
+{
+    int rc = -ENOENT;
+
+    if (ctx->patch_nosync)
+        rc = ctx->patch_nosync(ctx->addrs[index], insn);
+    if (!rc)
+        return 0;
+
+    /* Fallback if the kernel's native nosync text writer is unavailable. */
+    return hotpatch_nosync(ctx->addrs[index], insn);
+}
+
+/*
+ * Run while stop_machine has every other CPU quiesced. Temporarily write the
+ * exact three-instruction branch patch and restore the original instructions
+ * before any CPU can execute the trampoline. This separates patch installation
+ * from runtime execution of the entry trampoline.
+ */
+static int syscall_4_4_patch_restore_test_cb(void *arg)
+{
+    struct syscall_4_4_patch_restore_ctx *ctx = arg;
+
+    ctx->ran = 1;
+    for (int i = 0; i < 3; i++) {
+        int rc = syscall_4_4_patch_restore_write(ctx, i, ctx->patch[i]);
+        if (rc) {
+            ctx->patch_rc = rc;
+            break;
+        }
+    }
+
+    /* Restore every original word, even if the replacement write failed early. */
+    for (int i = 0; i < 3; i++) {
+        int rc = syscall_4_4_patch_restore_write(ctx, i, ctx->backup[i]);
+        if (rc && !ctx->restore_rc)
+            ctx->restore_rc = rc;
+    }
+
+    /*
+     * One more full restoration pass using KP's direct nosync writer. This is
+     * a best-effort recovery while all CPUs are still stopped.
+     */
+    if (ctx->restore_rc) {
+        int retry_rc = 0;
+        for (int i = 0; i < 3; i++) {
+            int rc = hotpatch_nosync(ctx->addrs[i], ctx->backup[i]);
+            if (rc && !retry_rc)
+                retry_rc = rc;
+        }
+        ctx->restore_rc = retry_rc;
+    }
+
+    return ctx->restore_rc ? ctx->restore_rc : ctx->patch_rc;
+}
+#endif
 
 /*
  * Global syscall dispatcher.
@@ -356,6 +670,7 @@ typedef struct
     void *udata;
     int8_t allow_skip;
     int8_t bypass_gate;
+    int8_t require_gate;
     volatile int8_t state;
 } syscall_hook_slot_t;
 
@@ -393,7 +708,7 @@ static int syscall_hook_collect(int nr, int is_compat, int gate_ok, struct sysca
     for (int i = 0; i < high; i++) {
         if (syscall_hooks[i].state != CHAIN_ITEM_STATE_READY) continue;
         if (syscall_hooks[i].nr != nr || syscall_hooks[i].is_compat != is_compat) continue;
-        if (!gate_ok && !syscall_hooks[i].bypass_gate) continue;
+        if (!gate_ok && syscall_hooks[i].require_gate && !syscall_hooks[i].bypass_gate) continue;
         if (n >= max) break;
         out[n].before = (syscall_hook_cb_t)syscall_hooks[i].before;
         out[n].after = (syscall_hook_cb_t)syscall_hooks[i].after;
@@ -404,18 +719,40 @@ static int syscall_hook_collect(int nr, int is_compat, int gate_ok, struct sysca
     return n;
 }
 
+/* Implemented with the Linux 4.4 special-wrapper table below. */
+static bool syscall_4_4_hook_target_is_special(int nr, int is_compat);
+
 static hook_err_t syscall_hook_add(int nr, int is_compat, void *before, void *after, void *udata, int allow_skip,
-                                   int bypass_gate)
+                                   int bypass_gate, int require_gate)
 {
+    /* Special 4.4 wrappers tail-dispatch with the original pt_regs stack and
+     * cannot run the generic callback chain. Reject such registrations rather
+     * than reporting success for a hook that would never be invoked. */
+    if (syscall_hook_global && syscall_4_4_hook_target_is_special(nr, is_compat)) {
+        logkv("syscall hook rejected: 4.4 special wrapper nr=%d compat=%d\n", nr, is_compat);
+        return -HOOK_BAD_ADDRESS;
+    }
+
     unsigned long flags = kp_private_spin_lock(&syscall_hook_lock);
 
+    int matching_hooks = 0;
     for (int i = 0; i < SYSCALL_HOOK_SLOT_NUM; i++) {
         if (syscall_hooks[i].state != CHAIN_ITEM_STATE_READY) continue;
         if (syscall_hooks[i].nr != nr || syscall_hooks[i].is_compat != is_compat) continue;
+        matching_hooks++;
         if ((before && syscall_hooks[i].before == before) || (after && syscall_hooks[i].after == after)) {
             kp_private_spin_unlock(&syscall_hook_lock, flags);
             return -HOOK_DUPLICATED;
         }
+    }
+
+    /* syscall_hook_collect() has a fixed per-syscall snapshot capacity. Reject
+     * excess registrations instead of succeeding for callbacks that cannot run. */
+    if (matching_hooks >= SYSCALL_HOOK_MAX_MATCH) {
+        kp_private_spin_unlock(&syscall_hook_lock, flags);
+        logkv("syscall hook add: nr %d compat %d failed (per-syscall limit %d)\n",
+              nr, is_compat, SYSCALL_HOOK_MAX_MATCH);
+        return -HOOK_CHAIN_FULL;
     }
 
     for (int i = 0; i < SYSCALL_HOOK_SLOT_NUM; i++) {
@@ -429,6 +766,7 @@ static hook_err_t syscall_hook_add(int nr, int is_compat, void *before, void *af
         syscall_hooks[i].after = after;
         syscall_hooks[i].allow_skip = allow_skip;
         syscall_hooks[i].bypass_gate = bypass_gate;
+        syscall_hooks[i].require_gate = require_gate;
         syscall_hook_barrier();
         syscall_hooks[i].state = CHAIN_ITEM_STATE_READY;
         if (i + 1 > syscall_hook_high) syscall_hook_high = i + 1;
@@ -460,6 +798,7 @@ static void syscall_hook_remove(int nr, int is_compat, void *before, void *after
         syscall_hooks[i].after = 0;
         syscall_hooks[i].allow_skip = 0;
         syscall_hooks[i].bypass_gate = 0;
+        syscall_hooks[i].require_gate = 0;
         syscall_hook_barrier();
         syscall_hooks[i].state = CHAIN_ITEM_STATE_EMPTY;
         break;
@@ -474,8 +813,10 @@ int syscall_hook_global_enabled(void)
 }
 KP_EXPORT_SYMBOL(syscall_hook_global_enabled);
 
-/* Register the single uid gate evaluated once per syscall before dispatching any
- * callback. Passing NULL disables gating (all callbacks run). */
+/* Configure the predicate used only by callbacks registered through the gated
+ * syscall-hook APIs. Ordinary hook_syscalln()/hook_compat_syscalln() callbacks
+ * retain their original all-caller semantics. Passing NULL allows gated hooks
+ * to run for every caller. */
 void syscall_hook_set_gate(int (*gate)(void))
 {
     syscall_hook_gate = gate;
@@ -492,6 +833,35 @@ static long syscall_dispatch_nr(struct pt_regs *regs, unsigned long scno, int is
     return nr;
 }
 
+static int syscall_hook_gate_current(void)
+{
+    /*
+     * Evaluate the shared predicate on every syscall while the dispatcher is
+     * active, but apply its result only to explicitly gated slots. This preserves
+     * the uniform per-syscall cost profile while ordinary hook registrations
+     * continue to run for all UIDs.
+     */
+    if (!syscall_hook_gate) return 1;
+    return syscall_hook_gate() ? 1 : 0;
+}
+
+/* The dispatcher hooks the four-argument invoke_syscall()/el0_svc_common().
+ * arg7 is not a syscall argument; keep the entry-time gate result there so the
+ * after phase uses the same decision even if the syscall changes credentials. */
+#define SYSCALL_HOOK_GATE_STATE_MAGIC 0x4b50474154450000ULL
+static void syscall_hook_store_gate_state(hook_fargs8_t *args, int gate_ok)
+{
+    args->arg7 = SYSCALL_HOOK_GATE_STATE_MAGIC | (gate_ok ? 1ULL : 0ULL);
+}
+
+static int syscall_hook_load_gate_state(hook_fargs8_t *args, int *gate_ok)
+{
+    uint64_t state = args->arg7;
+    if ((state & ~1ULL) != SYSCALL_HOOK_GATE_STATE_MAGIC) return 0;
+    *gate_ok = (state & 1ULL) ? 1 : 0;
+    return 1;
+}
+
 /* Sized as hook_fargs8_t (the largest callback type used in-tree) even though
  * el0_svc_common takes four arguments: has_syscall_wrapper makes syscall_argn()
  * read the register frame rather than the struct's args[], but keeping the
@@ -506,20 +876,22 @@ static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
     int is_compat = compat_user_mode(regs) ? 1 : 0;
     long nr = syscall_dispatch_nr(regs, args->arg1, is_compat);
 
-    if (!syscall_hook_high) return;
+    if (!syscall_hook_high) {
+        syscall_hook_store_gate_state(args, 1);
+        return;
+    }
 
-    /* One uid gate, evaluated once per syscall for every callback, instead of a
-     * root check inside each callback. For a process that is not su-authorized
-     * nothing is dispatched, so behavior and cost are the same across all
-     * syscalls: no per-syscall fingerprint, and fstatat/statx/... cannot
-     * disagree. Slots registered with bypass_gate (the magic supercall, which
-     * authenticates with its own key) still run. */
-    int gate_ok = 1;
-    if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
+    /* UID gating is opt-in per registration. Ordinary hooks retain their
+     * all-caller semantics; only explicitly gated sucompat callbacks are
+     * suppressed for UIDs rejected by the shared predicate. */
+    int gate_ok = syscall_hook_gate_current();
 
     struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
     int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
-    if (!n) return;
+    if (!n) {
+        syscall_hook_store_gate_state(args, gate_ok);
+        return;
+    }
 
     /* Hooked at invoke_syscall (handler granularity) el0_svc_common has already
      * set these; hooked at its entry we must set them ourselves so callbacks
@@ -560,6 +932,7 @@ static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
     } else {
         args->skip_origin = 0;
     }
+    syscall_hook_store_gate_state(args, gate_ok);
 }
 
 static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
@@ -579,10 +952,11 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 
     if (!syscall_hook_high) return;
 
-    /* Same gate as the before phase: an after callback must never run without
-     * its before callback having run. */
+    /* Reuse the entry-time decision so a credential-changing syscall cannot
+     * cause a gated after-callback to run without its before phase. */
     int gate_ok = 1;
-    if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
+    if (!syscall_hook_load_gate_state(args, &gate_ok))
+        gate_ok = syscall_hook_gate_current();
 
     struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
     int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
@@ -598,21 +972,1047 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
     regs->regs[0] = args->ret;
 }
 
+
+/*
+ * Linux 4.4 syscall entry backend.
+ *
+ * 4.4 does not have invoke_syscall()/el0_svc_common(). The actual ARM64 entry
+ * path selects the handler directly in el0_svc_naked:
+ *
+ *   ldr x16, [stbl, scno, lsl #3]
+ *   blr x16
+ *
+ * The same sequence occurs once in the fast path and once in __sys_trace.
+ * Patch both sites to a small KP assembly entry. The KP dispatcher then calls
+ * the original table entry and continues at the original return path.
+ */
+#define KP4_SYSCALL_LDR_X16_SCNO 0xf87a7b70u
+#define KP4_SYSCALL_BLR_X16      0xd63f0200u
+/* Exact STR X0, [SP] encoding used to save the syscall return value. */
+#define KP4_SYSCALL_STR_X0_SP      0xf90003e0u
+#define KP4_SYSCALL_B_MASK        0xfc000000u
+#define KP4_SYSCALL_B             0x14000000u
+
+extern void kp_syscall_4_4_fast_entry(void);
+extern void kp_syscall_4_4_trace_entry(void);
+extern void kp_syscall_4_4_fast_bypass_entry(void);
+extern void kp_syscall_4_4_trace_bypass_entry(void);
+extern void __noreturn kp_syscall_4_4_resume(uintptr_t frame, long ret, uintptr_t target);
+extern void __noreturn kp_syscall_4_4_passthrough_fast(uintptr_t frame);
+extern void __noreturn kp_syscall_4_4_passthrough_trace(uintptr_t frame);
+extern void __noreturn kp_syscall_4_4_resume_special(uintptr_t frame, uintptr_t handler, uintptr_t target, int trace);
+
+static uintptr_t syscall_4_4_fast_site;
+static uintptr_t syscall_4_4_trace_site;
+uintptr_t syscall_4_4_fast_return;
+/* Read by the 4.4 special-wrapper trace trampoline after the handler returns. */
+uintptr_t kp_syscall_4_4_trace_return;
+/* Original out-of-range syscall path guarded by the trace bypass. */
+uintptr_t kp_syscall_4_4_trace_invalid_target;
+static uint32_t syscall_4_4_fast_backup[3];
+static uint32_t syscall_4_4_trace_backup[3];
+
+/*
+ * Linux 4.4 ARM64/compat has syscall-table entries that are assembly wrappers,
+ * not ordinary C handlers. They depend on SP pointing at the original pt_regs
+ * frame and, for some compat calls, translate split 32-bit arguments. Calling
+ * those entries from the C dispatcher corrupts their ABI (notably sigreturn).
+ *
+ * These handlers must be tail-dispatched from the original pt_regs stack and
+ * therefore bypass generic before/after callbacks. No current KP hook relies
+ * on observing these special syscalls.
+ */
+static const char *const syscall_4_4_special_wrapper_names[] = {
+    "sys_rt_sigreturn_wrapper",
+    "compat_sys_sigreturn_wrapper",
+    "compat_sys_rt_sigreturn_wrapper",
+    "compat_sys_statfs64_wrapper",
+    "compat_sys_fstatfs64_wrapper",
+    "compat_sys_pread64_wrapper",
+    "compat_sys_pwrite64_wrapper",
+    "compat_sys_truncate64_wrapper",
+    "compat_sys_ftruncate64_wrapper",
+    "compat_sys_readahead_wrapper",
+    "compat_sys_fadvise64_64_wrapper",
+    "compat_sys_sync_file_range2_wrapper",
+    "compat_sys_fallocate_wrapper",
+    "compat_sys_mmap2_wrapper",
+};
+#define SYSCALL_4_4_SPECIAL_WRAPPER_NUM \
+    (sizeof(syscall_4_4_special_wrapper_names) / sizeof(syscall_4_4_special_wrapper_names[0]))
+static uintptr_t syscall_4_4_special_wrapper_addrs[SYSCALL_4_4_SPECIAL_WRAPPER_NUM];
+static bool syscall_4_4_special_wrappers_ready;
+
+/* Some 4.4 builds can expose compat handlers without a resolved
+ * compat_sys_call_table pointer. Mirror syscall_init()'s symbol-based compat
+ * detection instead of relying only on that pointer. */
+static bool syscall_4_4_compat_layer_present(void)
+{
+    return kallsyms_lookup_name("__arm64_compat_sys_openat") ||
+           kallsyms_lookup_name("compat_sys_call_table") ||
+           kallsyms_lookup_name("compat_sys_openat");
+}
+
+static int syscall_4_4_resolve_special_wrappers(void)
+{
+    int found = 0;
+
+    /*
+     * Keep every destination index constant. On this XZP/4.4 path, dynamic
+     * array stores in the same loop as kallsyms_lookup_name have correlated
+     * with boot loops, while constant-index stores have booted successfully.
+     */
+    syscall_4_4_special_wrapper_addrs[0] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[0]);
+    syscall_4_4_special_wrapper_addrs[1] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[1]);
+    syscall_4_4_special_wrapper_addrs[2] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[2]);
+    syscall_4_4_special_wrapper_addrs[3] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[3]);
+    syscall_4_4_special_wrapper_addrs[4] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[4]);
+    syscall_4_4_special_wrapper_addrs[5] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[5]);
+    syscall_4_4_special_wrapper_addrs[6] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[6]);
+    syscall_4_4_special_wrapper_addrs[7] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[7]);
+    syscall_4_4_special_wrapper_addrs[8] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[8]);
+    syscall_4_4_special_wrapper_addrs[9] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[9]);
+    syscall_4_4_special_wrapper_addrs[10] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[10]);
+    syscall_4_4_special_wrapper_addrs[11] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[11]);
+    syscall_4_4_special_wrapper_addrs[12] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[12]);
+    syscall_4_4_special_wrapper_addrs[13] =
+        kallsyms_lookup_name(syscall_4_4_special_wrapper_names[13]);
+
+    for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_NUM; i++) {
+        if (syscall_4_4_special_wrapper_addrs[i]) {
+            found++;
+        } else {
+#if !KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+            log_boot("4.4 dispatcher: unresolved special wrapper %s\n",
+                     syscall_4_4_special_wrapper_names[i]);
+#endif
+        }
+    }
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
+    /*
+     * The wrapper-list-only mode stops here so lookup behavior can be tested
+     * independently from compat-layer symbol probes.
+     */
+    syscall_4_4_special_wrappers_ready = false;
+    return found;
+#endif
+
+    int required = syscall_4_4_compat_layer_present()
+        ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
+    syscall_4_4_special_wrappers_ready =
+        syscall_4_4_special_wrapper_addrs[0] != 0 && found >= required;
+
+    return found;
+}
+
+static bool syscall_4_4_is_special_wrapper(uintptr_t addr)
+{
+    if (!addr) return false;
+
+    for (unsigned int i = 0; i < SYSCALL_4_4_SPECIAL_WRAPPER_NUM; i++) {
+        if (syscall_4_4_special_wrapper_addrs[i] == addr)
+            return true;
+    }
+
+    return false;
+}
+
+
+static bool syscall_4_4_is_b(uint32_t insn)
+{
+    return (insn & KP4_SYSCALL_B_MASK) == KP4_SYSCALL_B;
+}
+
+static uintptr_t syscall_4_4_b_target(uintptr_t pc, uint32_t insn)
+{
+    int64_t imm26 = (int64_t)(insn & 0x03ffffffu);
+    if (imm26 & (1LL << 25)) imm26 -= (1LL << 26);
+
+    /* A negative signed left shift is undefined in C. Multiply the signed
+     * branch displacement, then use uintptr_t addition so backward branches
+     * wrap to the correct address in the kernel's high virtual address range. */
+    return pc + (uintptr_t)(imm26 * 4);
+}
+
+static bool syscall_4_4_is_str_x0_sp(uint32_t insn)
+{
+    /* The destination must be pt_regs->regs[0], at offset zero from SP. */
+    return insn == KP4_SYSCALL_STR_X0_SP;
+}
+
+/*
+ * Emit:
+ *
+ *   adrp x16, target@page
+ *   add  x16, x16, target@pageoff
+ *   br   x16
+ *
+ * This reaches any target within +/-4 GiB of the patch site. KP memory and the
+ * kernel image are expected to be in the same 48-bit kernel VA region; if the
+ * runtime layout violates that assumption we leave the original syscall path
+ * untouched rather than installing a truncated branch.
+ */
+static bool syscall_4_4_make_branch(uintptr_t pc, uintptr_t target, uint32_t out[3])
+{
+    int64_t pc_page = (int64_t)(pc & ~0xffful);
+    int64_t target_page = (int64_t)(target & ~0xffful);
+    int64_t delta_pages = (target_page - pc_page) >> 12;
+
+    if (delta_pages < -(1LL << 20) || delta_pages > ((1LL << 20) - 1)) return false;
+
+    uint32_t imm21 = (uint32_t)(delta_pages & 0x1fffff);
+    uint32_t immlo = imm21 & 0x3;
+    uint32_t immhi = (imm21 >> 2) & 0x7ffff;
+    uint32_t pageoff = (uint32_t)(target & 0xfff);
+
+    out[0] = 0x90000010u | (immlo << 29) | (immhi << 5);
+    out[1] = 0x91000210u | (pageoff << 10);
+    out[2] = 0xd61f0200u; /* br x16 */
+    return true;
+}
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+typedef void *(*syscall_4_4_module_alloc_fn_t)(unsigned long size);
+typedef void (*syscall_4_4_module_free_fn_t)(void *addr);
+typedef void (*syscall_4_4_flush_icache_range_fn_t)(unsigned long start, unsigned long end);
+
+/* Kept allocated for as long as the trace-site branch can reach it. */
+static void *syscall_4_4_trace_island;
+
+static int syscall_4_4_trace_island_prepare(uintptr_t trace, uintptr_t target,
+                                            void **island_out,
+                                            syscall_4_4_module_free_fn_t *free_out,
+                                            uint32_t *branch_out)
+{
+    uintptr_t alloc_sym = kallsyms_lookup_name("module_alloc");
+    uintptr_t free_sym = kallsyms_lookup_name("module_memfree");
+    uintptr_t flush_sym = kallsyms_lookup_name("flush_icache_range");
+    if (!free_sym) free_sym = kallsyms_lookup_name("vfree");
+
+    if (!alloc_sym || !free_sym || !flush_sym) {
+        log_boot("4.4 dispatcher TRACE-ISLAND: symbols missing module_alloc=%llx free=%llx flush_icache_range=%llx; no kernel text writes\n",
+                 (uint64_t)alloc_sym, (uint64_t)free_sym, (uint64_t)flush_sym);
+        return -ENOENT;
+    }
+
+    syscall_4_4_module_alloc_fn_t alloc_fn =
+        (syscall_4_4_module_alloc_fn_t)alloc_sym;
+    syscall_4_4_module_free_fn_t free_fn =
+        (syscall_4_4_module_free_fn_t)free_sym;
+    syscall_4_4_flush_icache_range_fn_t flush_fn =
+        (syscall_4_4_flush_icache_range_fn_t)flush_sym;
+
+    void *island = alloc_fn(0x1000);
+    if (!island) {
+        log_boot("4.4 dispatcher TRACE-ISLAND: module_alloc(0x1000) failed; no kernel text writes\n");
+        return -ENOMEM;
+    }
+
+    uintptr_t addr = (uintptr_t)island;
+    if ((addr & 3u) || (trace & 3u) || !target) {
+        free_fn(island);
+        log_boot("4.4 dispatcher TRACE-ISLAND: invalid alignment/target trace=%llx island=%llx target=%llx; no kernel text writes\n",
+                 (uint64_t)trace, (uint64_t)addr, (uint64_t)target);
+        return -EINVAL;
+    }
+
+    /* Do not install over an entry sequence other than the validated 4.4 shape. */
+    if (((uint32_t *)trace)[0] != KP4_SYSCALL_LDR_X16_SCNO ||
+        ((uint32_t *)trace)[1] != KP4_SYSCALL_BLR_X16 ||
+        ((uint32_t *)trace)[2] != KP4_SYSCALL_STR_X0_SP) {
+        free_fn(island);
+        log_boot("4.4 dispatcher TRACE-ISLAND: trace instructions changed; no kernel text writes\n");
+        return -EAGAIN;
+    }
+
+    uintptr_t distance = addr >= trace ? addr - trace : trace - addr;
+    int64_t delta;
+    if (addr >= trace) {
+        if (distance > 0x07fffffcu) {
+            free_fn(island);
+            log_boot("4.4 dispatcher TRACE-ISLAND: allocated page outside positive B range trace=%llx island=%llx distance=%llx\n",
+                     (uint64_t)trace, (uint64_t)addr, (uint64_t)distance);
+            return -ERANGE;
+        }
+        delta = (int64_t)distance;
+    } else {
+        if (distance > 0x08000000u) {
+            free_fn(island);
+            log_boot("4.4 dispatcher TRACE-ISLAND: allocated page outside negative B range trace=%llx island=%llx distance=%llx\n",
+                     (uint64_t)trace, (uint64_t)addr, (uint64_t)distance);
+            return -ERANGE;
+        }
+        delta = -(int64_t)distance;
+    }
+    if (distance & 3u) {
+        free_fn(island);
+        log_boot("4.4 dispatcher TRACE-ISLAND: unaligned branch displacement distance=%llx\n",
+                 (uint64_t)distance);
+        return -EINVAL;
+    }
+
+    /*
+     * Island layout:
+     *   +0: ldr x16, +8       (0x58000050; loads the absolute target literal)
+     *   +4: br x16            (0xd61f0200)
+     *   +8: 64-bit target address
+     *
+     * Use a literal jump so the island does not need ADRP reach to KP's
+     * separate virtual allocation. The trace site itself receives only one B.
+     */
+    uint32_t *code = (uint32_t *)island;
+    code[0] = 0x58000050u;
+    code[1] = 0xd61f0200u;
+    *(uintptr_t *)((uint8_t *)island + 8) = target;
+    asm volatile("dsb ishst" ::: "memory");
+    flush_fn((unsigned long)addr, (unsigned long)(addr + 16));
+    asm volatile("dsb ish\n\tisb" ::: "memory");
+
+    uint32_t imm26 = (uint32_t)(delta / 4) & 0x03ffffffu;
+    *branch_out = 0x14000000u | imm26;
+    *island_out = island;
+    *free_out = free_fn;
+
+    log_boot("4.4 dispatcher TRACE-ISLAND PREPARED: trace=%llx island=%llx target=%llx distance=%llx branch=%08x; island=ldr-literal/br/absolute-target; trace+4 and trace+8 preserved; kernel text not patched yet\n",
+             (uint64_t)trace, (uint64_t)addr, (uint64_t)target,
+             (uint64_t)distance, *branch_out);
+    return 0;
+}
+#endif
+
+static int syscall_4_4_find_sites(uintptr_t el0_svc, uintptr_t *fast, uintptr_t *trace)
+{
+    uintptr_t ret_fast = syscall_4_4_fast_return;
+    uintptr_t fast_found = 0;
+    uintptr_t trace_found = 0;
+
+    for (unsigned long off = 0; off < 0x1000; off += 4) {
+        uintptr_t addr = el0_svc + off;
+        uint32_t *p = (uint32_t *)addr;
+        uint32_t a = p[0];
+        uint32_t b = p[1];
+        uint32_t c = p[2];
+
+        if (a != KP4_SYSCALL_LDR_X16_SCNO || b != KP4_SYSCALL_BLR_X16) continue;
+
+        if (!fast_found && syscall_4_4_is_b(c)) {
+            if (!ret_fast || syscall_4_4_b_target(addr + 8, c) == ret_fast)
+                fast_found = addr;
+            continue;
+        }
+
+        if (!trace_found && syscall_4_4_is_str_x0_sp(c))
+            trace_found = addr;
+    }
+
+    if (!fast_found || !trace_found) return -ENOENT;
+    *fast = fast_found;
+    *trace = trace_found;
+    return 0;
+}
+
+static long syscall_4_4_invoke_original(struct pt_regs *regs, long nr, int is_compat)
+{
+    uintptr_t addr;
+
+    if (nr < 0) return -ENOSYS;
+    if (is_compat) {
+#ifdef __NR_compat_syscalls
+        if (nr >= __NR_compat_syscalls) return -ENOSYS;
+#else
+        if (nr >= 460) return -ENOSYS;
+#endif
+    } else {
+#ifdef __NR_syscalls
+        if (nr >= __NR_syscalls) return -ENOSYS;
+#else
+        if (nr >= 460) return -ENOSYS;
+#endif
+    }
+
+    addr = syscalln_addr((int)nr, is_compat);
+    if (!addr) return -ENOSYS;
+
+    /*
+     * Kernels with ARCH_HAS_SYSCALL_WRAPPER expose table entries that take a
+     * pt_regs pointer, not six raw C arguments. The entry frame is still live
+     * here; pass it through unchanged instead of unpacking it into the wrong
+     * ABI. Special assembly wrappers are tail-dispatched before reaching here.
+     */
+    if (has_syscall_wrapper) {
+        return ((warp_raw_syscall_f)addr)(regs);
+    }
+
+    /*
+     * On kernels without syscall wrappers, ARM64 syscall handlers use x0..x5.
+     * Passing six arguments is ABI compatible with handlers that consume fewer
+     * arguments; unused registers are simply ignored by the callee.
+     */
+    return ((raw_syscall6_f)addr)(
+        (long)regs->regs[0],
+        (long)regs->regs[1],
+        (long)regs->regs[2],
+        (long)regs->regs[3],
+        (long)regs->regs[4],
+        (long)regs->regs[5]
+    );
+}
+
+static bool syscall_4_4_nr_is_valid(unsigned long nr, int is_compat)
+{
+    if (is_compat) {
+#ifdef __NR_compat_syscalls
+        return nr < (unsigned long)__NR_compat_syscalls;
+#else
+        return nr < 460;
+#endif
+    }
+#ifdef __NR_syscalls
+    return nr < (unsigned long)__NR_syscalls;
+#else
+    return nr < 460;
+#endif
+}
+
+static bool syscall_4_4_has_registered_hook(int nr, int is_compat)
+{
+    int high = syscall_hook_high;
+    if (high > SYSCALL_HOOK_SLOT_NUM) high = SYSCALL_HOOK_SLOT_NUM;
+
+    for (int i = 0; i < high; i++) {
+        if (syscall_hooks[i].state != CHAIN_ITEM_STATE_READY) continue;
+        if (syscall_hooks[i].nr != nr || syscall_hooks[i].is_compat != is_compat) continue;
+        return true;
+    }
+
+    return false;
+}
+
+static bool syscall_4_4_hook_target_is_special(int nr, int is_compat)
+{
+    if (kver < VERSION(4, 4, 0) || kver >= VERSION(4, 5, 0)) return false;
+    if (!syscall_4_4_special_wrappers_ready) return false;
+    if (!syscall_4_4_nr_is_valid((unsigned long)nr, is_compat)) return false;
+
+    return syscall_4_4_is_special_wrapper(syscalln_addr(nr, is_compat));
+}
+
+static void __noreturn syscall_4_4_dispatch(struct pt_regs *regs, unsigned long nr, int trace, uintptr_t frame)
+{
+    hook_fargs8_t fargs;
+    int is_compat;
+    long ret;
+    uintptr_t target;
+
+    if (!regs) {
+        ret = -ENOSYS;
+        goto resume;
+    }
+
+    is_compat = compat_user_mode(regs) ? 1 : 0;
+    regs->syscallno = (long)nr;
+
+    if (!syscall_4_4_nr_is_valid(nr, is_compat)) {
+        ret = -ENOSYS;
+        regs->regs[0] = (uint64_t)ret;
+        target = trace ? kp_syscall_4_4_trace_return : syscall_4_4_fast_return;
+        if (!target && trace) target = syscall_4_4_trace_site + 12;
+        kp_syscall_4_4_resume(frame, ret, target);
+        __builtin_unreachable();
+    }
+
+    /*
+     * The experimental backend must not call every syscall-table entry as a
+     * C function. Most syscalls have no KP callback; replay the original
+     * LDR/BLR + fast/trace continuation with SP restored to the pt_regs frame.
+     * This keeps ordinary syscalls and assembly wrappers on their native ABI.
+     */
+    if (!syscall_4_4_has_registered_hook((int)nr, is_compat)) {
+        if (trace)
+            kp_syscall_4_4_passthrough_trace(frame);
+        else
+            kp_syscall_4_4_passthrough_fast(frame);
+        __builtin_unreachable();
+    }
+
+    /*
+     * Do not call pt_regs/argument-repacking wrappers as ordinary C functions.
+     * Resume on the untouched kernel stack, restore x0-x7 from pt_regs, and
+     * tail-dispatch to the wrapper with the original return continuation.
+     */
+    /*
+     * Invalid syscall numbers must not be used to index either syscall table.
+     * The generic invoker returns -ENOSYS for these; the special-wrapper lookup
+     * must do the same range check before reading a table entry.
+     */
+    uintptr_t handler = 0;
+    if (syscall_4_4_nr_is_valid(nr, is_compat))
+        handler = syscalln_addr((int)nr, is_compat);
+    if (syscall_4_4_is_special_wrapper(handler)) {
+        target = trace ? kp_syscall_4_4_trace_return : syscall_4_4_fast_return;
+        if (!target)
+            target = trace ? syscall_4_4_trace_site + 12 : syscall_4_4_fast_return;
+        kp_syscall_4_4_resume_special(frame, handler, target, trace ? 1 : 0);
+        __builtin_unreachable();
+    }
+
+    fargs.chain = 0;
+    fargs.skip_origin = 0;
+    fargs.ret = 0;
+    fargs.arg0 = (uint64_t)regs;
+    fargs.arg1 = nr;
+    fargs.arg2 = 0;
+    fargs.arg3 = 0;
+    fargs.arg4 = 0;
+    fargs.arg5 = 0;
+    fargs.arg6 = 0;
+    fargs.arg7 = 0;
+
+    syscall_dispatch_before(&fargs, 0);
+
+    if (fargs.skip_origin && syscall_hook_handler_granular) {
+        ret = (long)regs->regs[0];
+    } else {
+        ret = syscall_4_4_invoke_original(regs, (long)nr, is_compat);
+        regs->regs[0] = ret;
+    }
+
+    /*
+     * Keep the same after-hook semantics as the upstream dispatcher. This is
+     * also what lets a before hook use set_syscall_argn() and an after hook
+     * rewrite regs->regs[0].
+     */
+    syscall_dispatch_after(&fargs, 0);
+    ret = (long)regs->regs[0];
+
+resume:
+    target = trace ? kp_syscall_4_4_trace_return : syscall_4_4_fast_return;
+    if (!target)
+        target = trace ? syscall_4_4_trace_site + 12 : syscall_4_4_fast_return;
+
+    /* This helper restores SP and x19-x30 before branching to the kernel path. */
+    kp_syscall_4_4_resume(frame, ret, target);
+    __builtin_unreachable();
+}
+
+/*
+ * The assembly entry labels are intentionally separate so the return address
+ * can be chosen without touching the 4.4 entry stack/register convention.
+ */
+void __noreturn kp_syscall_4_4_fast_dispatch(struct pt_regs *regs, unsigned long nr, uintptr_t frame)
+{
+    syscall_4_4_dispatch(regs, nr, 0, frame);
+    __builtin_unreachable();
+}
+
+void __noreturn kp_syscall_4_4_trace_dispatch(struct pt_regs *regs, unsigned long nr, uintptr_t frame)
+{
+    syscall_4_4_dispatch(regs, nr, 1, frame);
+    __builtin_unreachable();
+}
+
+/*
+ * Read-only validation for the Linux 4.4 entry-site heuristic. This executes
+ * only while the global dispatcher is disabled and never modifies kernel text.
+ */
+static void syscall_dispatch_4_4_probe(void)
+{
+    uintptr_t el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
+    uintptr_t ret_fast = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
+    uintptr_t fast = 0;
+    uintptr_t trace = 0;
+    uint32_t fast_patch[3];
+    uint32_t trace_patch[3];
+
+    if (!el0_svc || !ret_fast) {
+        log_boot("4.4 dispatcher probe: missing entry symbol (el0_svc=%llx ret_fast=%llx)\n",
+                 (uint64_t)el0_svc, (uint64_t)ret_fast);
+        return;
+    }
+
+    syscall_4_4_fast_return = ret_fast;
+    /* Keep this startup probe strictly read-only. Wrapper resolution belongs
+     * to the experimental dispatcher and is not needed to validate entry sites.
+     */
+    if (syscall_4_4_find_sites(el0_svc, &fast, &trace)) {
+        log_boot("4.4 dispatcher probe: handler-selection sites not found (el0_svc=%llx ret_fast=%llx)\n",
+                 (uint64_t)el0_svc, (uint64_t)ret_fast);
+        return;
+    }
+
+    if (!syscall_4_4_make_branch(fast, (uintptr_t)&kp_syscall_4_4_fast_entry, fast_patch) ||
+        !syscall_4_4_make_branch(trace, (uintptr_t)&kp_syscall_4_4_trace_entry, trace_patch)) {
+        log_boot("4.4 dispatcher probe: KP veneer outside ADRP range (fast=%llx trace=%llx)\n",
+                 (uint64_t)fast, (uint64_t)trace);
+        return;
+    }
+
+    log_boot("4.4 dispatcher probe: el0_svc=%llx ret_fast=%llx fast=%llx trace=%llx\n",
+             (uint64_t)el0_svc, (uint64_t)ret_fast, (uint64_t)fast, (uint64_t)trace);
+    log_boot("4.4 dispatcher probe insns: fast=%08x/%08x/%08x trace=%08x/%08x/%08x\n",
+             ((uint32_t *)fast)[0], ((uint32_t *)fast)[1], ((uint32_t *)fast)[2],
+             ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
+}
+
+static int syscall_4_4_restore_sites(void *fast_addrs[3], void *trace_addrs[3])
+{
+    int trace_rc = hotpatch(trace_addrs, syscall_4_4_trace_backup, 3);
+    int fast_rc = hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
+
+    if (trace_rc || fast_rc) {
+        syscall_4_4_backend_unsafe = 1;
+        log_boot("4.4 dispatcher: entry-site rollback failed (trace=%d fast=%d); reject syscall hooks\n",
+                 trace_rc, fast_rc);
+        return -EIO;
+    }
+
+    syscall_4_4_fast_site = 0;
+    syscall_4_4_trace_site = 0;
+    return 0;
+}
+
+static int syscall_dispatch_4_4_init(void)
+{
+    uintptr_t el0_svc;
+    uintptr_t fast;
+    uintptr_t trace;
+    uint32_t fast_patch[3];
+    uint32_t trace_patch[3];
+
+    if (syscall_4_4_legacy_slot_hooks_seen) {
+        log_boot("4.4 dispatcher: legacy syscall-table hooks already registered; refuse backend switch\n");
+        return -EBUSY;
+    }
+
+    /*
+     * syscall_4_4_invoke_original() now follows has_syscall_wrapper and passes
+     * the live pt_regs frame to wrapper handlers. Special assembly wrappers
+     * are still tail-dispatched with their original stack convention.
+     */
+
+    el0_svc = kallsyms_lookup_name_by_suffix("el0_svc");
+    syscall_4_4_fast_return = kallsyms_lookup_name_by_suffix("ret_fast_syscall");
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_PREFIX_ONLY
+    /*
+     * Diagnostic mode: run constant-index wrapper-table stores and the
+     * compat-layer symbol probe, then return before entry scanning, branch
+     * encoding, or text patching.
+     */
+    int wrapper_count = syscall_4_4_resolve_special_wrappers();
+    log_boot("4.4 dispatcher WRAPPER-ALL-CONSTANT-STORES-COMPAT-PROBE: el0_svc=%llx ret_fast=%llx found=%d/%d ready=%d table=%llx/%llx/%llx; use legacy hooks\n",
+             (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
+             wrapper_count, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
+             syscall_4_4_special_wrappers_ready ? 1 : 0,
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0],
+             (uint64_t)syscall_4_4_special_wrapper_addrs[1],
+             (uint64_t)syscall_4_4_special_wrapper_addrs[2]);
+    return -EAGAIN;
+#endif
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_FIRST_ONLY
+    /*
+     * Ask the exact-name symbol resolver about only the required native
+     * rt_sigreturn wrapper. Do not enumerate the remaining wrappers, probe for
+     * compat support, or assign dispatcher entry-site state.
+     */
+    uintptr_t native_rt_sigreturn =
+        kallsyms_lookup_name("sys_rt_sigreturn_wrapper");
+    log_boot("4.4 dispatcher WRAPPER-FIRST-ONLY: el0_svc=%llx ret_fast=%llx native_rt_sigreturn=%llx; skip remaining wrapper/site setup and use legacy hooks\n",
+             (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return,
+             (uint64_t)native_rt_sigreturn);
+    return -EAGAIN;
+#endif
+#if KP_SYSCALL_4_4_EXPERIMENTAL_SYMBOLS_ONLY
+    /*
+     * Isolate only the two entry-symbol lookups. Deliberately return a failure
+     * so syscall_dispatch_init() takes its existing read-only probe/fallback
+     * path; no wrapper enumeration, site scan, branch encoding, or text patch
+     * is performed by the experimental initializer in this mode.
+     */
+    log_boot("4.4 dispatcher SYMBOLS-ONLY: el0_svc=%llx ret_fast=%llx; skip wrapper/site setup and use legacy hooks\n",
+             (uint64_t)el0_svc, (uint64_t)syscall_4_4_fast_return);
+    return -EAGAIN;
+#endif
+    int special_wrappers = syscall_4_4_resolve_special_wrappers();
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPER_LIST_ONLY
+    log_boot("4.4 dispatcher WRAPPER-LIST-ONLY: resolved=%d/%d native_rt_sigreturn=%llx; skipped compat probes and site setup; use legacy hooks\n",
+             special_wrappers, (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM,
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
+    return -EAGAIN;
+#endif
+    int required_wrappers = syscall_4_4_compat_layer_present()
+        ? (int)SYSCALL_4_4_SPECIAL_WRAPPER_NUM : 1;
+#if KP_SYSCALL_4_4_EXPERIMENTAL_WRAPPERS_ONLY
+    /*
+     * Run the special-wrapper name resolution and compat-layer detection,
+     * but deliberately return through the existing legacy-hook fallback.
+     * This isolates that phase from syscall-site discovery, global site-state
+     * assignment, branch preparation, and every kernel-text write.
+     */
+    log_boot("4.4 dispatcher WRAPPERS-ONLY: resolved=%d required=%d native_rt_sigreturn=%llx; skip site setup and use legacy hooks\n",
+             special_wrappers, required_wrappers,
+             (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
+    return -EAGAIN;
+#endif
+    if (!syscall_4_4_special_wrapper_addrs[0] ||
+        special_wrappers < required_wrappers) {
+        log_boot("4.4 dispatcher: required special wrappers unavailable (%d/%d, native rt_sigreturn=%llx); keep per-syscall hooks\n",
+                 special_wrappers, required_wrappers,
+                 (uint64_t)syscall_4_4_special_wrapper_addrs[0]);
+        return -ENOENT;
+    }
+    if (!el0_svc || !syscall_4_4_fast_return) {
+        log_boot("4.4 dispatcher: missing el0_svc/ret_fast_syscall\\n");
+        return -ENOENT;
+    }
+
+    kp_syscall_4_4_trace_return = 0;
+    if (!syscall_4_4_find_sites(el0_svc, &fast, &trace)) {
+        /* The trace return is immediately after the original STR X0 instruction. */
+        kp_syscall_4_4_trace_return = trace + 12;
+    } else {
+        log_boot("4.4 dispatcher: syscall dispatch sites not found near el0_svc\\n");
+        return -ENOENT;
+    }
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+    /*
+     * The trace-site LDR is only valid after the original scno < sc_nr check.
+     * Guard again in the assembly bypass so an out-of-range compat/private
+     * syscall can never index past compat_sys_call_table. Decode the existing
+     * B.hs target and retain the kernel's original __ni_sys_trace path.
+     */
+    {
+        uintptr_t bounds_branch_addr = trace - 20;
+        uint32_t bounds_cmp = ((uint32_t *)trace)[-6];
+        uint32_t bounds_branch = ((uint32_t *)trace)[-5];
+        long imm19;
+        long branch_delta;
+        uintptr_t invalid_target;
+
+        /* cmp x26, x25; b.hs __ni_sys_trace (known 4.4 entry sequence). */
+        if (bounds_cmp != 0xeb19035fu ||
+            (bounds_branch & 0xff00001fu) != 0x54000002u) {
+            log_boot("4.4 dispatcher TRACE-BYPASS: syscall bounds guard not found before trace site; no trace-site write\n");
+            return -ENOENT;
+        }
+
+        imm19 = (long)((bounds_branch >> 5) & 0x7ffffu);
+        if (imm19 & 0x40000) imm19 -= 0x80000;
+        branch_delta = imm19 * 4;
+        invalid_target = (uintptr_t)((long)bounds_branch_addr + branch_delta);
+        if (invalid_target <= trace || invalid_target > trace + 0x100) {
+            log_boot("4.4 dispatcher TRACE-BYPASS: decoded __ni_sys_trace target out of range (%llx); no trace-site write\n",
+                     (uint64_t)invalid_target);
+            return -ENOENT;
+        }
+        kp_syscall_4_4_trace_invalid_target = invalid_target;
+        log_boot("4.4 dispatcher TRACE-BYPASS guard ready: cmp=%llx branch=%llx insn=%08x __ni_sys_trace=%llx\n",
+                 (uint64_t)(trace - 24), (uint64_t)bounds_branch_addr,
+                 bounds_branch, (uint64_t)invalid_target);
+    }
+#endif
+
+    syscall_4_4_fast_site = fast;
+    syscall_4_4_trace_site = trace;
+
+    uintptr_t fast_entry_target = (uintptr_t)&kp_syscall_4_4_fast_entry;
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS
+    fast_entry_target = (uintptr_t)&kp_syscall_4_4_fast_bypass_entry;
+#endif
+    /* The island mode also targets the real C-backed trace dispatcher. */
+    uintptr_t trace_entry_target = (uintptr_t)&kp_syscall_4_4_trace_entry;
+    if (!syscall_4_4_make_branch(fast, fast_entry_target, fast_patch) ||
+        !syscall_4_4_make_branch(trace, trace_entry_target, trace_patch)) {
+        log_boot("4.4 dispatcher: KP entry outside ADRP range\\n");
+        return -ERANGE;
+    }
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PREPARE_ONLY
+    /*
+     * Read-only diagnostic: execute symbol lookup, special-wrapper resolution,
+     * entry-site discovery, and branch encoding, but do not write kernel text,
+     * invoke stop_machine, or change global syscall-hook state. Return an
+     * explicit fallback status because the global dispatcher is not installed.
+     */
+    log_boot("4.4 dispatcher PREPARE-ONLY: fast=%llx trace=%llx ret_fast=%llx\\n",
+             fast, trace, syscall_4_4_fast_return);
+    log_boot("4.4 dispatcher PREPARE-ONLY original fast=%08x/%08x/%08x trace=%08x/%08x/%08x\\n",
+             ((uint32_t *)fast)[0], ((uint32_t *)fast)[1], ((uint32_t *)fast)[2],
+             ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
+    log_boot("4.4 dispatcher PREPARE-ONLY encoded fast=%08x/%08x/%08x trace=%08x/%08x/%08x; NO TEXT WRITES ATTEMPTED\\n",
+             fast_patch[0], fast_patch[1], fast_patch[2],
+             trace_patch[0], trace_patch[1], trace_patch[2]);
+    return -EAGAIN;
+#endif
+
+    for (int i = 0; i < 3; i++) {
+        syscall_4_4_fast_backup[i] = ((uint32_t *)fast)[i];
+        syscall_4_4_trace_backup[i] = ((uint32_t *)trace)[i];
+    }
+
+    void *fast_addrs[3] = {(void *)fast, (void *)(fast + 4), (void *)(fast + 8)};
+    void *trace_addrs[3] = {(void *)trace, (void *)(trace + 4), (void *)(trace + 8)};
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_PATCH_RESTORE
+    {
+        struct syscall_4_4_patch_restore_ctx test = {0};
+        uintptr_t stop_addr = kallsyms_lookup_name("stop_machine");
+        syscall_4_4_stop_machine_fn stop_fn =
+            (syscall_4_4_stop_machine_fn)stop_addr;
+
+        if (!stop_fn) {
+            log_boot("4.4 dispatcher PATCH-RESTORE: stop_machine unavailable; no entry-site write attempted\\n");
+            return -ENOENT;
+        }
+
+        test.addrs[0] = fast_addrs[0];
+        test.addrs[1] = fast_addrs[1];
+        test.addrs[2] = fast_addrs[2];
+        test.patch[0] = fast_patch[0];
+        test.patch[1] = fast_patch[1];
+        test.patch[2] = fast_patch[2];
+        test.backup[0] = syscall_4_4_fast_backup[0];
+        test.backup[1] = syscall_4_4_fast_backup[1];
+        test.backup[2] = syscall_4_4_fast_backup[2];
+        test.patch_nosync =
+            (syscall_4_4_insn_patch_nosync_fn)
+            kallsyms_lookup_name("aarch64_insn_patch_text_nosync");
+
+        int stop_rc = stop_fn(syscall_4_4_patch_restore_test_cb, &test, 0);
+        if (!test.ran) {
+            log_boot("4.4 dispatcher PATCH-RESTORE: stop_machine callback did not run rc=%d\\n",
+                     stop_rc);
+            return stop_rc ? stop_rc : -EIO;
+        }
+        if (test.restore_rc) {
+            syscall_4_4_backend_unsafe = 1;
+            log_boot("4.4 dispatcher PATCH-RESTORE: CRITICAL original instruction restore failed rc=%d; syscall hooks disabled\\n",
+                     test.restore_rc);
+            return -EIO;
+        }
+        if (test.patch_rc || stop_rc) {
+            log_boot("4.4 dispatcher PATCH-RESTORE: temporary patch failed patch_rc=%d stop_rc=%d; original instructions restored\\n",
+                     test.patch_rc, stop_rc);
+            return test.patch_rc ? test.patch_rc : stop_rc;
+        }
+
+        log_boot("4.4 dispatcher PATCH-RESTORE passed: branch encoding/write/restore succeeded; trampoline was never executed; keep legacy hooks\\n");
+        return -EAGAIN;
+    }
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_ONLY
+    /*
+     * Live trace-site patching is disabled after the dev.127 panic
+     * (PC=0x400800, LR=__ni_sys_trace+8). Keep this mode read-only until
+     * compat and slow-path control flow have been validated. The probe records
+     * the original instructions and proposed branch, then falls back to the
+     * legacy syscall-table hooks without modifying kernel text.
+     */
+    log_boot("4.4 dispatcher TRACE-ONLY PREFLIGHT (no text writes after dev.127 panic): fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx; trace_orig=%08x/%08x/%08x trace_branch=%08x/%08x/%08x; NO TEXT WRITES, legacy syscall-table hooks retained\\n",
+             fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return,
+             ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2],
+             trace_patch[0], trace_patch[1], trace_patch[2]);
+    return -EAGAIN;
+#elif KP_SYSCALL_4_4_EXPERIMENTAL_TRACE_BYPASS
+    /*
+     * The trace+8 STR is a shared continuation reached by __ni_sys_trace for
+     * out-of-range compat/private syscall numbers. Never overwrite it.
+     *
+     * Prepare an executable literal-jump island, patch the normal fast entry
+     * using its already validated three-word veneer, then patch ONLY trace[0]
+     * with a single B to the island. The island branches to kp_syscall_4_4_trace_entry
+     * (the real dispatcher path), not the direct-handler diagnostic bypass.
+     */
+    {
+        void *island = 0;
+        syscall_4_4_module_free_fn_t island_free_fn = 0;
+        uint32_t trace_branch = 0;
+        int rc = syscall_4_4_trace_island_prepare(
+            trace, trace_entry_target, &island, &island_free_fn, &trace_branch);
+        if (rc) return rc;
+
+        rc = hotpatch(fast_addrs, fast_patch, 3);
+        if (rc) {
+            int rollback_rc = hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
+            if (rollback_rc) {
+                syscall_4_4_backend_unsafe = 1;
+                log_boot("4.4 dispatcher TRACE-ISLAND: fast-site patch rc=%d rollback rc=%d; syscall hooks disabled\n",
+                         rc, rollback_rc);
+            } else {
+                log_boot("4.4 dispatcher TRACE-ISLAND: fast-site patch rc=%d; original fast site restored\n", rc);
+            }
+            island_free_fn(island);
+            return rollback_rc ? -EIO : rc;
+        }
+
+        void *trace_first_addr[1] = {(void *)trace};
+        rc = hotpatch(trace_first_addr, &trace_branch, 1);
+        if (rc) {
+            int trace_restore_rc =
+                hotpatch(trace_first_addr, syscall_4_4_trace_backup, 1);
+            int fast_restore_rc =
+                hotpatch(fast_addrs, syscall_4_4_fast_backup, 3);
+            if (trace_restore_rc || fast_restore_rc) {
+                syscall_4_4_backend_unsafe = 1;
+                if (trace_restore_rc) {
+                    /* A partial trace patch may still branch here: never free it. */
+                    syscall_4_4_trace_island = island;
+                    log_boot("4.4 dispatcher TRACE-ISLAND: CRITICAL rollback failed trace=%d fast=%d; retained island=%llx and disabled syscall hooks\n",
+                             trace_restore_rc, fast_restore_rc, (uint64_t)island);
+                } else {
+                    island_free_fn(island);
+                    log_boot("4.4 dispatcher TRACE-ISLAND: trace restored but fast rollback failed rc=%d; syscall hooks disabled\n",
+                             fast_restore_rc);
+                }
+                return -EIO;
+            }
+            island_free_fn(island);
+            log_boot("4.4 dispatcher TRACE-ISLAND: trace branch patch rc=%d; both original entry paths restored\n", rc);
+            return rc;
+        }
+
+        syscall_4_4_trace_island = island;
+        syscall_hook_handler_granular = 1;
+        syscall_hook_barrier();
+        syscall_hook_global = 1;
+        log_boot("4.4 dispatcher TRACE-ISLAND ACTIVE: fast=%llx trace=%llx island=%llx target=%llx branch=%08x; trace[1]=%08x trace[2]=%08x unchanged; trace+8 shared return intact; global C-backed syscall dispatcher enabled\n",
+                 (uint64_t)fast, (uint64_t)trace, (uint64_t)island,
+                 (uint64_t)trace_entry_target, trace_branch,
+                 ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
+        return 0;
+    }
+#else
+#if !KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS && !KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
+    /*
+     * The legacy active path patches all three trace-site instructions. It has
+     * already produced the dev.127 failure (PC=0x400800, LR=__ni_sys_trace+8)
+     * because trace+8 is also a shared continuation for the native invalid
+     * syscall path. Never execute that known-unsafe patch by default. The live
+     * dispatcher must use the single-B trace island, while explicit fast-only
+     * diagnostics keep their isolated, trace-site-untouched behaviour.
+     */
+    log_boot("4.4 dispatcher: unsafe three-word trace-site patch disabled; use the single-B trace-island path; no kernel text writes\n");
+    return -EOPNOTSUPP;
+#endif
+    int rc = hotpatch(fast_addrs, fast_patch, 3);
+    if (rc) {
+        int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
+        log_boot("4.4 dispatcher: fast site patch rc=%d rollback rc=%d\n", rc, rollback_rc);
+        return rollback_rc ? rollback_rc : rc;
+    }
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_BYPASS
+    /*
+     * Diagnostic mode: redirect the fast entry through a pure assembly
+     * pass-through without calling the C dispatcher or touching pt_regs.
+     * Leave the trace/audit entry and global-hook state unchanged, so later
+     * registrations continue to use the legacy per-syscall hook path. This
+     * isolates entry/return control flow from global-dispatcher registration.
+     */
+    log_boot("4.4 dispatcher FAST-BYPASS ACTIVE: fast=%llx trace=%llx ret_fast=%llx; trace site untouched orig=%08x/%08x/%08x; assembly pass-through bypasses C dispatcher, global hook disabled, legacy syscall-table hooks retained\\n",
+             fast, trace, syscall_4_4_fast_return,
+             ((uint32_t *)trace)[0], ((uint32_t *)trace)[1], ((uint32_t *)trace)[2]);
+    return 0;
+#endif
+
+#if KP_SYSCALL_4_4_EXPERIMENTAL_FAST_ONLY
+    /*
+     * Diagnostic mode: patch only the normal fast syscall entry. Leave the
+     * trace/audit entry entirely untouched to distinguish a fast-entry failure
+     * from a trace-entry or two-site interaction failure. This mode is for
+     * boot-path isolation only; traced syscalls intentionally retain legacy
+     * per-syscall behavior and this is not a full-featured runtime mode.
+     */
+    /*
+     * Keep global hook registration disabled in this diagnostic. APatch and
+     * other consumers continue using the original per-syscall table hooks, so
+     * the untouched trace entry cannot bypass a newly selected global backend.
+     */
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx; FAST-ONLY diagnostic mode enabled, legacy syscall-table hooks retained and trace site unchanged\n",
+             fast, trace, syscall_4_4_fast_return);
+    return 0;
+#endif
+
+    rc = hotpatch(trace_addrs, trace_patch, 3);
+    if (rc) {
+        int rollback_rc = syscall_4_4_restore_sites(fast_addrs, trace_addrs);
+        log_boot("4.4 dispatcher: trace site patch rc=%d rollback rc=%d\n", rc, rollback_rc);
+        return rollback_rc ? rollback_rc : rc;
+    }
+
+    syscall_hook_handler_granular = 1;
+    syscall_hook_barrier();
+    syscall_hook_global = 1;
+
+    log_boot("4.4 dispatcher: fast=%llx trace=%llx ret_fast=%llx trace_ret=%llx, global syscall hook enabled\\n",
+             fast, trace, syscall_4_4_fast_return, kp_syscall_4_4_trace_return);
+    return 0;
+#endif
+}
+
 void syscall_dispatch_init(void)
 {
     if (syscall_hook_global) return;
+
+    /*
+     * The 4.4 entry-site dispatcher stays opt-in until validated on the target
+     * device. Default builds only perform the read-only probe and keep legacy
+     * per-syscall hooks. Set KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER=1 in an
+     * explicit test build to attempt installation before any syscall hooks are
+     * registered. A reported failure falls back only after successful rollback;
+     * if rollback itself fails, syscall-hook registration is rejected instead
+     * of mixing the experimental entry path with legacy per-syscall hooks.
+     */
+    if (kver >= VERSION(4, 4, 0) && kver < VERSION(4, 5, 0)) {
+        if (KP_SYSCALL_4_4_EXPERIMENTAL_DISPATCHER) {
+            int rc;
+            log_boot("4.4 global syscall dispatcher: experimental opt-in enabled\n");
+            rc = syscall_dispatch_4_4_init();
+            if (rc) {
+                if (syscall_4_4_backend_unsafe) {
+                    log_boot("4.4 global syscall dispatcher init failed rc=%d; entry state uncertain, syscall hooks disabled\n",
+                             rc);
+                } else {
+                    log_boot("4.4 global syscall dispatcher init failed rc=%d; keep per-syscall hooks\n", rc);
+                    syscall_dispatch_4_4_probe();
+                }
+            }
+        } else {
+            log_boot("4.4 global syscall dispatcher disabled; keep per-syscall hooks pending runtime validation\n");
+            syscall_dispatch_4_4_probe();
+        }
+        return;
+    }
+
     if (!has_syscall_wrapper) {
         log_boot("syscall dispatcher: no syscall wrapper, keep per-syscall hooks\n");
         return;
     }
 
-    /* Prefer invoke_syscall: it runs after syscall_trace_enter (seccomp/ptrace)
+    /*
+     * Prefer invoke_syscall: it runs after syscall_trace_enter (seccomp/ptrace)
      * and before syscall_trace_exit, i.e. at the same granularity as the old
      * per-syscall hooks. Hooking there lets skip_origin skip only the real
      * handler while el0_svc_common still performs its entry/exit work. Fall back
      * to el0_svc_common, which is coarser and cannot honour skip_origin.
      * GCC clones (LTO/constprop/isra) get a trailing '.' suffix; the helper
-     * requires that separator, so el0_svc_common_compat is not matched. */
+     * requires that separator, so el0_svc_common_compat is not matched.
+     */
     uintptr_t addr = 0;
     const char *name = 0;
     int granular = 0;
@@ -629,17 +2029,14 @@ void syscall_dispatch_init(void)
             name = "el0_svc_common";
             uint32_t *insn = (uint32_t *)addr;
             if (insn[1] != 0xa9bd7bfd) {
-                log_boot("Shadow Call Stack detected , bypass union syscall hook\n");
+                log_boot("Shadow Call Stack detected, bypass union syscall hook\n");
                 return;
-            }else{
+            } else {
                 log_boot("Shadow Call Stack not detected, proceed with union syscall hook\n");
             }
         }
     }
 
-
-
-    
     if (!addr) {
         log_boot("syscall dispatcher: no invoke_syscall/el0_svc_common, keep per-syscall hooks\n");
         return;
@@ -654,18 +2051,28 @@ void syscall_dispatch_init(void)
     syscall_hook_handler_granular = granular;
     syscall_hook_barrier();
     syscall_hook_global = 1;
-    log_boot("syscall dispatcher: hooked %s at %llx (skip_origin %s), global syscall hook enabled\n", name,
-             (uint64_t)addr, granular ? "supported" : "unsupported");
+    log_boot("syscall dispatcher: hooked %s at %llx (skip_origin %s), global syscall hook enabled\n",
+             name, (uint64_t)addr, granular ? "supported" : "unsupported");
 }
 KP_EXPORT_SYMBOL(syscall_dispatch_init);
 
 hook_err_t hook_syscalln(int nr, int narg, void *before, void *after, void *udata)
 {
-    if (syscall_hook_global) return syscall_hook_add(nr, 0, before, after, udata, 0, 0);
+    if (syscall_hook_global) return syscall_hook_add(nr, 0, before, after, udata, 0, 0, 0);
     if (sys_call_table) return fp_wrap_syscalln(nr, narg, 0, before, after, udata);
     return inline_wrap_syscalln(nr, narg, 0, before, after, udata);
 }
 KP_EXPORT_SYMBOL(hook_syscalln);
+
+/* Opt-in UID-gated hook. Legacy backends still invoke callbacks, so callers
+ * must retain their own authorization checks for those fallback paths. */
+hook_err_t hook_syscalln_gated(int nr, int narg, void *before, void *after, void *udata)
+{
+    if (syscall_hook_global) return syscall_hook_add(nr, 0, before, after, udata, 0, 0, 1);
+    if (sys_call_table) return fp_wrap_syscalln(nr, narg, 0, before, after, udata);
+    return inline_wrap_syscalln(nr, narg, 0, before, after, udata);
+}
+KP_EXPORT_SYMBOL(hook_syscalln_gated);
 
 void unhook_syscalln(int nr, void *before, void *after)
 {
@@ -677,11 +2084,20 @@ KP_EXPORT_SYMBOL(unhook_syscalln);
 
 hook_err_t hook_compat_syscalln(int nr, int narg, void *before, void *after, void *udata)
 {
-    if (syscall_hook_global) return syscall_hook_add(nr, 1, before, after, udata, 0, 0);
+    if (syscall_hook_global) return syscall_hook_add(nr, 1, before, after, udata, 0, 0, 0);
     if (compat_sys_call_table) return fp_wrap_syscalln(nr, narg, 1, before, after, udata);
     return inline_wrap_syscalln(nr, narg, 1, before, after, udata);
 }
 KP_EXPORT_SYMBOL(hook_compat_syscalln);
+
+/* Compat equivalent of hook_syscalln_gated(). */
+hook_err_t hook_compat_syscalln_gated(int nr, int narg, void *before, void *after, void *udata)
+{
+    if (syscall_hook_global) return syscall_hook_add(nr, 1, before, after, udata, 0, 0, 1);
+    if (compat_sys_call_table) return fp_wrap_syscalln(nr, narg, 1, before, after, udata);
+    return inline_wrap_syscalln(nr, narg, 1, before, after, udata);
+}
+KP_EXPORT_SYMBOL(hook_compat_syscalln_gated);
 
 /* Like hook_syscalln but the callback may set skip_origin to suppress the real
  * syscall. Honoured only when the dispatcher is hooked at invoke_syscall; if it
@@ -692,7 +2108,7 @@ hook_err_t hook_syscalln_override(int nr, int narg, void *before, void *after, v
     /* bypass_gate: the magic supercall authenticates with its own key, so it must
      * still be dispatched for a uid that is not on the su allow list. */
     if (syscall_hook_global && syscall_hook_handler_granular)
-        return syscall_hook_add(nr, 0, before, after, udata, 1, 1);
+        return syscall_hook_add(nr, 0, before, after, udata, 1, 1, 0);
     if (sys_call_table) return fp_wrap_syscalln(nr, narg, 0, before, after, udata);
     return inline_wrap_syscalln(nr, narg, 0, before, after, udata);
 }
