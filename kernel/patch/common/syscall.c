@@ -670,6 +670,7 @@ typedef struct
     void *udata;
     int8_t allow_skip;
     int8_t bypass_gate;
+    int8_t require_gate;
     volatile int8_t state;
 } syscall_hook_slot_t;
 
@@ -707,7 +708,7 @@ static int syscall_hook_collect(int nr, int is_compat, int gate_ok, struct sysca
     for (int i = 0; i < high; i++) {
         if (syscall_hooks[i].state != CHAIN_ITEM_STATE_READY) continue;
         if (syscall_hooks[i].nr != nr || syscall_hooks[i].is_compat != is_compat) continue;
-        if (!gate_ok && !syscall_hooks[i].bypass_gate) continue;
+        if (!gate_ok && syscall_hooks[i].require_gate && !syscall_hooks[i].bypass_gate) continue;
         if (n >= max) break;
         out[n].before = (syscall_hook_cb_t)syscall_hooks[i].before;
         out[n].after = (syscall_hook_cb_t)syscall_hooks[i].after;
@@ -722,7 +723,7 @@ static int syscall_hook_collect(int nr, int is_compat, int gate_ok, struct sysca
 static bool syscall_4_4_hook_target_is_special(int nr, int is_compat);
 
 static hook_err_t syscall_hook_add(int nr, int is_compat, void *before, void *after, void *udata, int allow_skip,
-                                   int bypass_gate)
+                                   int bypass_gate, int require_gate)
 {
     /* Special 4.4 wrappers tail-dispatch with the original pt_regs stack and
      * cannot run the generic callback chain. Reject such registrations rather
@@ -734,13 +735,24 @@ static hook_err_t syscall_hook_add(int nr, int is_compat, void *before, void *af
 
     unsigned long flags = kp_private_spin_lock(&syscall_hook_lock);
 
+    int matching_hooks = 0;
     for (int i = 0; i < SYSCALL_HOOK_SLOT_NUM; i++) {
         if (syscall_hooks[i].state != CHAIN_ITEM_STATE_READY) continue;
         if (syscall_hooks[i].nr != nr || syscall_hooks[i].is_compat != is_compat) continue;
+        matching_hooks++;
         if ((before && syscall_hooks[i].before == before) || (after && syscall_hooks[i].after == after)) {
             kp_private_spin_unlock(&syscall_hook_lock, flags);
             return -HOOK_DUPLICATED;
         }
+    }
+
+    /* syscall_hook_collect() has a fixed per-syscall snapshot capacity. Reject
+     * excess registrations instead of succeeding for callbacks that cannot run. */
+    if (matching_hooks >= SYSCALL_HOOK_MAX_MATCH) {
+        kp_private_spin_unlock(&syscall_hook_lock, flags);
+        logkv("syscall hook add: nr %d compat %d failed (per-syscall limit %d)\n",
+              nr, is_compat, SYSCALL_HOOK_MAX_MATCH);
+        return -HOOK_CHAIN_FULL;
     }
 
     for (int i = 0; i < SYSCALL_HOOK_SLOT_NUM; i++) {
@@ -754,6 +766,7 @@ static hook_err_t syscall_hook_add(int nr, int is_compat, void *before, void *af
         syscall_hooks[i].after = after;
         syscall_hooks[i].allow_skip = allow_skip;
         syscall_hooks[i].bypass_gate = bypass_gate;
+        syscall_hooks[i].require_gate = require_gate;
         syscall_hook_barrier();
         syscall_hooks[i].state = CHAIN_ITEM_STATE_READY;
         if (i + 1 > syscall_hook_high) syscall_hook_high = i + 1;
@@ -785,6 +798,7 @@ static void syscall_hook_remove(int nr, int is_compat, void *before, void *after
         syscall_hooks[i].after = 0;
         syscall_hooks[i].allow_skip = 0;
         syscall_hooks[i].bypass_gate = 0;
+        syscall_hooks[i].require_gate = 0;
         syscall_hook_barrier();
         syscall_hooks[i].state = CHAIN_ITEM_STATE_EMPTY;
         break;
@@ -799,8 +813,10 @@ int syscall_hook_global_enabled(void)
 }
 KP_EXPORT_SYMBOL(syscall_hook_global_enabled);
 
-/* Register the single uid gate evaluated once per syscall before dispatching any
- * callback. Passing NULL disables gating (all callbacks run). */
+/* Configure the predicate used only by callbacks registered through the gated
+ * syscall-hook APIs. Ordinary hook_syscalln()/hook_compat_syscalln() callbacks
+ * retain their original all-caller semantics. Passing NULL allows gated hooks
+ * to run for every caller. */
 void syscall_hook_set_gate(int (*gate)(void))
 {
     syscall_hook_gate = gate;
@@ -817,6 +833,43 @@ static long syscall_dispatch_nr(struct pt_regs *regs, unsigned long scno, int is
     return nr;
 }
 
+static int syscall_hook_needs_gate(int nr, int is_compat)
+{
+    int high = syscall_hook_high;
+    if (high > SYSCALL_HOOK_SLOT_NUM) high = SYSCALL_HOOK_SLOT_NUM;
+
+    for (int i = 0; i < high; i++) {
+        if (syscall_hooks[i].state != CHAIN_ITEM_STATE_READY) continue;
+        if (syscall_hooks[i].nr != nr || syscall_hooks[i].is_compat != is_compat) continue;
+        if (syscall_hooks[i].require_gate && !syscall_hooks[i].bypass_gate) return 1;
+    }
+    return 0;
+}
+
+static int syscall_hook_gate_for(int nr, int is_compat)
+{
+    /* Avoid a UID/kstorage lookup on unrelated syscalls with no gated callbacks. */
+    if (!syscall_hook_gate || !syscall_hook_needs_gate(nr, is_compat)) return 1;
+    return syscall_hook_gate() ? 1 : 0;
+}
+
+/* The dispatcher hooks the four-argument invoke_syscall()/el0_svc_common().
+ * arg7 is not a syscall argument; keep the entry-time gate result there so the
+ * after phase uses the same decision even if the syscall changes credentials. */
+#define SYSCALL_HOOK_GATE_STATE_MAGIC 0x4b50474154450000ULL
+static void syscall_hook_store_gate_state(hook_fargs8_t *args, int gate_ok)
+{
+    args->arg7 = SYSCALL_HOOK_GATE_STATE_MAGIC | (gate_ok ? 1ULL : 0ULL);
+}
+
+static int syscall_hook_load_gate_state(hook_fargs8_t *args, int *gate_ok)
+{
+    uint64_t state = args->arg7;
+    if ((state & ~1ULL) != SYSCALL_HOOK_GATE_STATE_MAGIC) return 0;
+    *gate_ok = (state & 1ULL) ? 1 : 0;
+    return 1;
+}
+
 /* Sized as hook_fargs8_t (the largest callback type used in-tree) even though
  * el0_svc_common takes four arguments: has_syscall_wrapper makes syscall_argn()
  * read the register frame rather than the struct's args[], but keeping the
@@ -831,20 +884,22 @@ static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
     int is_compat = compat_user_mode(regs) ? 1 : 0;
     long nr = syscall_dispatch_nr(regs, args->arg1, is_compat);
 
-    if (!syscall_hook_high) return;
+    if (!syscall_hook_high) {
+        syscall_hook_store_gate_state(args, 1);
+        return;
+    }
 
-    /* One uid gate, evaluated once per syscall for every callback, instead of a
-     * root check inside each callback. For a process that is not su-authorized
-     * nothing is dispatched, so behavior and cost are the same across all
-     * syscalls: no per-syscall fingerprint, and fstatat/statx/... cannot
-     * disagree. Slots registered with bypass_gate (the magic supercall, which
-     * authenticates with its own key) still run. */
-    int gate_ok = 1;
-    if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
+    /* UID gating is opt-in per registration. Ordinary hooks retain their
+     * all-caller semantics; only explicitly gated sucompat callbacks are
+     * suppressed for UIDs rejected by the shared predicate. */
+    int gate_ok = syscall_hook_gate_for((int)nr, is_compat);
 
     struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
     int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
-    if (!n) return;
+    if (!n) {
+        syscall_hook_store_gate_state(args, gate_ok);
+        return;
+    }
 
     /* Hooked at invoke_syscall (handler granularity) el0_svc_common has already
      * set these; hooked at its entry we must set them ourselves so callbacks
@@ -885,6 +940,7 @@ static void syscall_dispatch_before(hook_fargs8_t *args, void *udata)
     } else {
         args->skip_origin = 0;
     }
+    syscall_hook_store_gate_state(args, gate_ok);
 }
 
 static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
@@ -904,10 +960,11 @@ static void syscall_dispatch_after(hook_fargs8_t *args, void *udata)
 
     if (!syscall_hook_high) return;
 
-    /* Same gate as the before phase: an after callback must never run without
-     * its before callback having run. */
+    /* Reuse the entry-time decision so a credential-changing syscall cannot
+     * cause a gated after-callback to run without its before phase. */
     int gate_ok = 1;
-    if (syscall_hook_gate) gate_ok = syscall_hook_gate() ? 1 : 0;
+    if (!syscall_hook_load_gate_state(args, &gate_ok))
+        gate_ok = syscall_hook_gate_for((int)nr, is_compat);
 
     struct syscall_hook_snapshot snap[SYSCALL_HOOK_MAX_MATCH];
     int n = syscall_hook_collect((int)nr, is_compat, gate_ok, snap, SYSCALL_HOOK_MAX_MATCH);
@@ -2009,11 +2066,21 @@ KP_EXPORT_SYMBOL(syscall_dispatch_init);
 
 hook_err_t hook_syscalln(int nr, int narg, void *before, void *after, void *udata)
 {
-    if (syscall_hook_global) return syscall_hook_add(nr, 0, before, after, udata, 0, 0);
+    if (syscall_hook_global) return syscall_hook_add(nr, 0, before, after, udata, 0, 0, 0);
     if (sys_call_table) return fp_wrap_syscalln(nr, narg, 0, before, after, udata);
     return inline_wrap_syscalln(nr, narg, 0, before, after, udata);
 }
 KP_EXPORT_SYMBOL(hook_syscalln);
+
+/* Opt-in UID-gated hook. Legacy backends still invoke callbacks, so callers
+ * must retain their own authorization checks for those fallback paths. */
+hook_err_t hook_syscalln_gated(int nr, int narg, void *before, void *after, void *udata)
+{
+    if (syscall_hook_global) return syscall_hook_add(nr, 0, before, after, udata, 0, 0, 1);
+    if (sys_call_table) return fp_wrap_syscalln(nr, narg, 0, before, after, udata);
+    return inline_wrap_syscalln(nr, narg, 0, before, after, udata);
+}
+KP_EXPORT_SYMBOL(hook_syscalln_gated);
 
 void unhook_syscalln(int nr, void *before, void *after)
 {
@@ -2025,11 +2092,20 @@ KP_EXPORT_SYMBOL(unhook_syscalln);
 
 hook_err_t hook_compat_syscalln(int nr, int narg, void *before, void *after, void *udata)
 {
-    if (syscall_hook_global) return syscall_hook_add(nr, 1, before, after, udata, 0, 0);
+    if (syscall_hook_global) return syscall_hook_add(nr, 1, before, after, udata, 0, 0, 0);
     if (compat_sys_call_table) return fp_wrap_syscalln(nr, narg, 1, before, after, udata);
     return inline_wrap_syscalln(nr, narg, 1, before, after, udata);
 }
 KP_EXPORT_SYMBOL(hook_compat_syscalln);
+
+/* Compat equivalent of hook_syscalln_gated(). */
+hook_err_t hook_compat_syscalln_gated(int nr, int narg, void *before, void *after, void *udata)
+{
+    if (syscall_hook_global) return syscall_hook_add(nr, 1, before, after, udata, 0, 0, 1);
+    if (compat_sys_call_table) return fp_wrap_syscalln(nr, narg, 1, before, after, udata);
+    return inline_wrap_syscalln(nr, narg, 1, before, after, udata);
+}
+KP_EXPORT_SYMBOL(hook_compat_syscalln_gated);
 
 /* Like hook_syscalln but the callback may set skip_origin to suppress the real
  * syscall. Honoured only when the dispatcher is hooked at invoke_syscall; if it
@@ -2040,7 +2116,7 @@ hook_err_t hook_syscalln_override(int nr, int narg, void *before, void *after, v
     /* bypass_gate: the magic supercall authenticates with its own key, so it must
      * still be dispatched for a uid that is not on the su allow list. */
     if (syscall_hook_global && syscall_hook_handler_granular)
-        return syscall_hook_add(nr, 0, before, after, udata, 1, 1);
+        return syscall_hook_add(nr, 0, before, after, udata, 1, 1, 0);
     if (sys_call_table) return fp_wrap_syscalln(nr, narg, 0, before, after, udata);
     return inline_wrap_syscalln(nr, narg, 0, before, after, udata);
 }

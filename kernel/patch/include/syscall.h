@@ -160,10 +160,14 @@ static inline void inline_unhook_compat_syscalln(int nr, void *before, void *aft
 //
 
 hook_err_t hook_syscalln(int nr, int narg, void *before, void *after, void *udata);
+/* Gated variants opt individual slots into syscall_hook_set_gate(); ordinary
+ * registrations keep their original semantics for all calling UIDs. */
+hook_err_t hook_syscalln_gated(int nr, int narg, void *before, void *after, void *udata);
 
 void unhook_syscalln(int nr, void *before, void *after);
 
 hook_err_t hook_compat_syscalln(int nr, int narg, void *before, void *after, void *udata);
+hook_err_t hook_compat_syscalln_gated(int nr, int narg, void *before, void *after, void *udata);
 
 void unhook_compat_syscalln(int nr, void *before, void *after);
 

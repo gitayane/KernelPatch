@@ -555,11 +555,10 @@ __maybe_unused static void su_handler_arg1_ufilename_before(hook_fargs6_t *args,
 {
     uid_t uid = current_uid();
 
-    /* In global-dispatcher mode the dispatcher already gated this callback on the
-     * caller's uid (su_syscall_gate), so the check would be redundant; the legacy
-     * per-syscall fallback has no gate, so it must stay there. udata == 1 marks a
-     * gated registration. */
-    if (!udata && uid != 0 && !is_su_allow_uid(uid) && !is_trusted_manager_uid(uid)) return;
+    /* Keep an explicit check for the legacy per-syscall backend and as defense
+     * in depth. The global dispatcher also gates this specific registration. */
+    (void)udata;
+    if (uid != 0 && !is_su_allow_uid(uid) && !is_trusted_manager_uid(uid)) return;
 
     char __user **u_filename_p = (char __user **)syscall_argn_p(args, 1);
 
@@ -787,22 +786,22 @@ int su_compat_init()
 
     // if (!enable) return;
 
-    rc = hook_syscalln(__NR_execve, 3, before_execve, 0, (void *)0);
+    rc = hook_syscalln_gated(__NR_execve, 3, before_execve, 0, (void *)0);
     log_boot("hook __NR_execve rc: %d\n", rc);
 
     /* Android init may execute commands through execveat().  Keep the
      * SUPERCMD/su redirection on both entry points; otherwise /system/bin/
      * truncate is executed literally and every apd bootstrap command exits
      * with status 1. */
-    rc = hook_syscalln(__NR_execveat, 5, before_execveat, 0, (void *)0);
+    rc = hook_syscalln_gated(__NR_execveat, 5, before_execveat, 0, (void *)0);
     log_boot("hook __NR_execveat rc: %d\n", rc);
 
     // __NR_execve 11
-    rc = hook_compat_syscalln(11, 3, before_execve, 0, (void *)1);
+    rc = hook_compat_syscalln_gated(11, 3, before_execve, 0, (void *)1);
     log_boot("hook 32 __NR_execve rc: %d\n", rc);
 
     // __NR_execveat 387 on arm64 compat
-    rc = hook_compat_syscalln(387, 5, before_execveat, 0, (void *)1);
+    rc = hook_compat_syscalln_gated(387, 5, before_execveat, 0, (void *)1);
     log_boot("hook 32 __NR_execveat rc: %d\n", rc);
 
     su_register_path_probe_hooks();
@@ -986,18 +985,17 @@ static int su_register_path_probe_hooks(void)
         log_boot("shared path probes incomplete; retaining legacy fstatat/faccessat probes\n");
     }
 
-    /* Legacy per-syscall fallback. */
-    void *gated = syscall_hook_global_enabled() ? (void *)1 : (void *)0;
-
+    /* Legacy per-syscall fallback. Gating is opt-in for the global dispatcher,
+     * while the callback retains its own UID check for legacy backends. */
     if (!su_legacy_fstatat_hooked) {
-        rc = hook_syscalln(__NR3264_fstatat, 4, su_handler_arg1_ufilename_before, 0, gated);
+        rc = hook_syscalln_gated(__NR3264_fstatat, 4, su_handler_arg1_ufilename_before, 0, (void *)0);
         su_legacy_fstatat_hooked = su_hook_result_is_registered(rc);
         log_boot("legacy hook __NR3264_fstatat rc: %d registered=%d\n", rc,
                  su_legacy_fstatat_hooked);
     }
 
     if (!su_legacy_faccessat_hooked) {
-        rc = hook_syscalln(__NR_faccessat, 3, su_handler_arg1_ufilename_before, 0, gated);
+        rc = hook_syscalln_gated(__NR_faccessat, 3, su_handler_arg1_ufilename_before, 0, (void *)0);
         su_legacy_faccessat_hooked = su_hook_result_is_registered(rc);
         log_boot("legacy hook __NR_faccessat rc: %d registered=%d\n", rc,
                  su_legacy_faccessat_hooked);
@@ -1005,14 +1003,14 @@ static int su_register_path_probe_hooks(void)
 
     /* 32-bit compat probes: fstatat64(327) / faccessat(334). */
     if (!su_legacy_compat_fstatat64_hooked) {
-        rc = hook_compat_syscalln(327, 4, su_handler_arg1_ufilename_before, 0, gated);
+        rc = hook_compat_syscalln_gated(327, 4, su_handler_arg1_ufilename_before, 0, (void *)0);
         su_legacy_compat_fstatat64_hooked = su_hook_result_is_registered(rc);
         log_boot("legacy hook 32 __NR_fstatat64 rc: %d registered=%d\n", rc,
                  su_legacy_compat_fstatat64_hooked);
     }
 
     if (!su_legacy_compat_faccessat_hooked) {
-        rc = hook_compat_syscalln(334, 3, su_handler_arg1_ufilename_before, 0, gated);
+        rc = hook_compat_syscalln_gated(334, 3, su_handler_arg1_ufilename_before, 0, (void *)0);
         su_legacy_compat_faccessat_hooked = su_hook_result_is_registered(rc);
         log_boot("legacy hook 32 __NR_faccessat rc: %d registered=%d\n", rc,
                  su_legacy_compat_faccessat_hooked);
