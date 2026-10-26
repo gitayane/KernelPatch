@@ -9,7 +9,6 @@
 #include <uapi/asm-generic/unistd.h>
 #include <linux/uaccess.h>
 #include <linux/cred.h>
-#include <linux/sched.h>
 #include <syscall.h>
 #include <linux/string.h>
 #include <kputils.h>
@@ -75,8 +74,7 @@ void before_getpid_dispatcher(hook_fargs4_t *args, void *udata)
     if (uid < 10000 || dispatcher_probe_logs >= 16) return;
 
     dispatcher_probe_logs++;
-    pr_info("KP syscall-hook gate compatibility probe: uid=%d pid=%d comm=%s\n",
-            uid, current->pid, current->comm);
+    pr_info("KP syscall-hook gate compatibility probe: uid=%d\n", uid);
 }
 
 void before_openat_1(hook_fargs4_t *args, void *udata)
