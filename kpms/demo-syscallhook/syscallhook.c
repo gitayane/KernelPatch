@@ -8,6 +8,8 @@
 #include <linux/printk.h>
 #include <uapi/asm-generic/unistd.h>
 #include <linux/uaccess.h>
+#include <linux/cred.h>
+#include <linux/sched.h>
 #include <syscall.h>
 #include <linux/string.h>
 #include <kputils.h>
@@ -21,6 +23,7 @@ KPM_DESCRIPTION("KernelPatch Module System Call Hook Example");
 
 const char *margs = 0;
 enum hook_type hook_type = NONE;
+static int dispatcher_hook_active;
 
 enum pid_type
 {
@@ -57,6 +60,24 @@ void before_openat_0(hook_fargs4_t *args, void *udata)
 }
 
 uint64_t open_counts = 0;
+
+/* Optional smoke test for the generic hook_syscalln() API when the experimental
+ * Linux 4.4 global dispatcher is active. Ordinary app UIDs must still reach this
+ * callback while sucompat gates only its own explicitly gated syscall hooks. */
+static volatile unsigned int dispatcher_probe_logs;
+
+void before_getpid_dispatcher(hook_fargs4_t *args, void *udata)
+{
+    (void)args;
+    (void)udata;
+
+    uid_t uid = current_uid();
+    if (uid < 10000 || dispatcher_probe_logs >= 16) return;
+
+    dispatcher_probe_logs++;
+    pr_info("KP syscall-hook gate compatibility probe: uid=%d pid=%d comm=%s\n",
+            uid, current->pid, current->comm);
+}
 
 void before_openat_1(hook_fargs4_t *args, void *udata)
 {
@@ -95,6 +116,10 @@ static long syscall_hook_demo_init(const char *args, const char *event, void *__
         pr_info("inline hook ...");
         hook_type = INLINE_CHAIN;
         err = inline_hook_syscalln(__NR_openat, 4, before_openat_0, 0, 0);
+    } else if (!strcmp("dispatcher_hook", margs)) {
+        pr_info("generic hook_syscalln dispatcher compatibility probe ...");
+        err = hook_syscalln(__NR_getpid, 0, before_getpid_dispatcher, 0, 0);
+        if (!err) dispatcher_hook_active = 1;
     } else {
         pr_warn("unknown args: %s\n", margs);
         return 0;
@@ -119,7 +144,10 @@ static long syscall_hook_demo_exit(void *__user reserved)
 {
     pr_info("kpm-syscall-hook-demo exit ...\n");
 
-    if (hook_type == INLINE_CHAIN) {
+    if (dispatcher_hook_active) {
+        unhook_syscalln(__NR_getpid, before_getpid_dispatcher, 0);
+        dispatcher_hook_active = 0;
+    } else if (hook_type == INLINE_CHAIN) {
         inline_unhook_syscalln(__NR_openat, before_openat_0, 0);
     } else if (hook_type == FUNCTION_POINTER_CHAIN) {
         fp_unhook_syscalln(__NR_openat, before_openat_0, 0);
