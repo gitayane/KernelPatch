@@ -405,6 +405,14 @@ jobs:
             kernel/kpimg-x86.elf
           name: kpimg.elf
 
+      - name: Upload XZP syscall-hook compatibility probe
+        if: startsWith(github.ref, 'refs/heads/work/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: xzp-syscall-hook-dispatcher-probe
+          path: kpms/demo-syscallhook/demo-syscallhook.kpm
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Zip-lib
         run: |
